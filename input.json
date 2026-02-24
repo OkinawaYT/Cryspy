@@ -1,0 +1,8 @@
+{
+  "elements": ["Fe", "Si", "Al"],
+  "natot_min": 3,
+  "natot_max": 20,
+  "cryspy_in": "cryspy.in",
+  "num_workers": 4,
+  "makecif": true
+}

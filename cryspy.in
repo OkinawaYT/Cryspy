@@ -1,0 +1,34 @@
+[basic]
+algo = EA
+calc_code = ASE
+tot_struc = 30
+nstage = 1
+njob = 8
+jobcmd = zsh
+jobfile = job_cryspy
+
+[EA]
+# n_crsov + n_perm + n_strain + n_rand + n_rotation must be n_pop
+n_pop = 3
+n_crsov = 0
+n_perm = 0
+n_strain = 0
+n_rand = 3
+n_elite = 2
+n_fittest = 7
+slct_func = TNM
+t_size = 2
+maxgen_ea = 5
+
+[structure]
+natot = 12
+atype = Pd Cu Co
+nat = 6 4 2
+mindist_1 = 1.9 1.9 1.9
+mindist_2 = 1.9 1.9 1.9
+mindist_3 = 1.9 1.9 1.9
+
+[ASE]
+ase_python = ase_in.py
+
+[option]

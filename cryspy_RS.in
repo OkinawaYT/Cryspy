@@ -1,0 +1,21 @@
+[basic]
+algo = RS
+calc_code = ASE
+tot_struc = 30
+nstage = 1
+njob = 8
+jobcmd = zsh
+jobfile = job_cryspy
+
+[structure]
+natot = 12
+atype = Pd Cu Co
+nat = 6 4 2
+mindist_1 = 1.9 1.9 1.9
+mindist_2 = 1.9 1.9 1.9
+mindist_3 = 1.9 1.9 1.9
+
+[ASE]
+ase_python = ase_in.py
+
+[option]

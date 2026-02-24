@@ -1,0 +1,7 @@
+tot_max=12
+min=(4 1 0)
+max=(6 4 2)
+atype=("Pd" "Cu" "Co")
+mindist_1=(1.9 1.9 1.9) 
+mindist_2=(1.9 1.9 1.9) 
+mindist_3=(1.9 1.9 1.9) 
