@@ -7,3 +7,8 @@ requires-python = ">=3.13"
 dependencies = [
     "pymatgen>=2025.10.7",
 ]
+
+[project.optional-dependencies]
+chgnet = [
+    "chgnet>=0.4.0",
+]
