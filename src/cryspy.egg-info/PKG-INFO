@@ -1,0 +1,44 @@
+Metadata-Version: 2.4
+Name: cryspy
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.13
+Description-Content-Type: text/markdown
+Requires-Dist: pymatgen>=2025.10.7
+Provides-Extra: chgnet
+Requires-Dist: chgnet>=0.4.0; extra == "chgnet"
+
+# Cryspy
+
+CrySPY 実行補助と CIF 生成スクリプトです。
+
+## uv 環境構築
+
+通常:
+
+```bash
+uv sync
+```
+
+CHGNet 連携 (`calc_in/ase_in_CHGNet.py`) を使う場合:
+
+```bash
+uv sync --extra chgnet
+```
+
+## 実行例
+
+```bash
+uv run python main.py
+uv run python run_cryspy.py
+uv run python cryspy_make_cifs.py
+```
+
+## 依存ライブラリ
+
+- 標準: `pymatgen`
+- オプション: `chgnet`
+
+## 備考
+
+CrySPY 本体コマンドの実行環境は別途必要です。

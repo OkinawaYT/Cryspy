@@ -1,0 +1,4 @@
+pymatgen>=2025.10.7
+
+[chgnet]
+chgnet>=0.4.0

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "cryspy"
 version = "0.1.0"
@@ -12,3 +16,9 @@ dependencies = [
 chgnet = [
     "chgnet>=0.4.0",
 ]
+
+[project.scripts]
+anl-cryspy = "anl_cryspy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
