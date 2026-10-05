@@ -22,3 +22,8 @@ anl-cryspy = "anl_cryspy.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]

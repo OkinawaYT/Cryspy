@@ -131,3 +131,25 @@ qsub job.sh
 - `cryspy_.in`, `cryspy_EA.in`, `cryspy_PdCo.in`, `cryspy_RS.in` の要否を確認し、不要なら削除、必要なら「どの実験に対応する設定か」をファイル名かコメントで明確化する。
 - `job.sh` のメール通知先など環境固有のハードコード値を、環境変数か設定ファイルに切り出す。
 - DFT リポジトリ全体でディレクトリ命名規約の統一（`0_Cryspy/` への移行）が検討されている場合、このディレクトリ名の変更が `job.sh` の `~/.local/bin/run_cryspy.py` 呼び出しパスやクラスターデプロイ設定に影響しないか、移行時に確認する。
+
+## anl-cryspy generate(構造探索バックエンド、DFTCommon の structsearch 契約)
+
+`anl-pyxtal generate` と同じ契約(`DFTCommon/docs/STRUCTSEARCH_CONTRACT.md`、schema は `docs/schemas/structsearch_generate.schema.json`)で、
+CrySPY(RS/EA)+ MLIP 緩和による探索を行い、**緩和後エネルギー上位 k(=`--n`)構造**を CIF で出力する。既存の `anl-cryspy`(引数なし)や
+`run_cryspy.py`、`calc_in/` は変更していない。
+
+```bash
+anl-cryspy generate --composition Au2CuPd --n 5 --seed 0 --out OUT \
+    --calculator chgnet-0.3 --algo ea --workers 2 --timeout 600 --json
+```
+- `--calculator`: `DFTCommon/calculators.yaml` のキー(既定 chgnet-0.3)。`emt` はテスト用ダブル。計算機の venv は
+  catalog の `venv_python` に委譲(CrySPY 本体は Cryspy/.venv)。ase_in テンプレートは1枚(`src/anl_cryspy/templates/ase_in.py_1`)。
+- `--algo rs|ea`(既定 ea)、`--tot-struc`(RS)、`--n-pop`/`--maxgen`(EA、maxgen は総世代数)、`--max-atoms`、`--timeout`(構造ごと秒)、`--workers`(上限2)。
+- 出力 JSON の各構造に `energy_per_atom`(eV/atom)と `meta`(calculator, algo, cryspy_id, generation, opt_status)。重複は StructureMatcher で除去(重複CIFは出力しない)。
+- 緩和は FrechetCellFilter + FixSymmetry + BFGS(fmax 0.05, 300 step)、スレッド<=4。システムメモリが 60% を超えたら中断(`ANL_CRYSPY_MEM_LIMIT`)。
+- 作業ディレクトリは一時ディレクトリ(`ANL_CRYSPY_WORKROOT` で場所指定、`ANL_CRYSPY_KEEP=1` / `--workdir` で保持)。
+
+限界: 組成は固定セル(`--max-atoms` 超なら gcd で縮約)。seed は CrySPY 本体に無いため sitecustomize 注入(random/numpy/PYTHONHASHSEED/pyxtal)で固定しており、
+EMT では RS/EA とも再現を確認したが、ML 計算機の浮動小数点差で順位が変わる可能性がある(ベストエフォート)。
+CrySPY は逐次起動方式のため小規模探索でも 1 起動あたり約 1.5 s の固定オーバーヘッドがある。
+テスト: `uv run --offline --frozen --with pytest pytest -q`(`ANL_CRYSPY_TEST_SLOW=1` で EA/seed、`ANL_CRYSPY_TEST_CHGNET=1` で CHGNet も実行)。

@@ -1,0 +1,79 @@
+# anl-cryspy generate 用 ASE テンプレート(1枚だけ。計算機ごとのラッパーは作らない)。
+# CrySPY が work/<ID>/ に POSCAR を置き、job_cryspy 経由でこれを MLIP venv の python で実行する。
+# 出力契約: log.tote(eV/cell)、CONTCAR(vasp形式)、out_check_opt(1語目: done/not_converged/timeout/error)。
+# 設定は環境変数: ANL_CALCULATOR, ANL_FMAX, ANL_STEPS, ANL_TIMEOUT, ANL_DFT_CALC_PATH
+import os
+import sys
+import json
+import signal
+import time
+
+for _k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+           "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ[_k] = str(min(int(os.environ.get(_k, "4") or 4), 4))
+
+import numpy as np
+from ase.io import read, write
+from ase.constraints import FixSymmetry
+from ase.optimize import BFGS
+
+try:  # ase 3.29 でも ase.filters.FrechetCellFilter は使える(ExpCellFilter は非推奨だが存在)
+    from ase.filters import FrechetCellFilter as CellFilter
+except ImportError:
+    from ase.filters import ExpCellFilter as CellFilter
+
+name = os.environ.get("ANL_CALCULATOR", "emt")
+fmax = float(os.environ.get("ANL_FMAX", "0.05"))
+steps = int(os.environ.get("ANL_STEPS", "300"))
+timeout = int(os.environ.get("ANL_TIMEOUT", "600"))
+
+
+def status(s, **extra):
+    with open("out_check_opt", "w") as f:
+        f.write(s + "\n")
+    with open("relax_info.json", "w") as f:
+        json.dump({"status": s, **extra}, f)
+
+
+def on_alarm(signum, frame):
+    raise TimeoutError(f"per-structure timeout {timeout}s")
+
+
+def make_calc(name):
+    if name == "emt":
+        from ase.calculators.emt import EMT
+        return EMT()
+    sys.path.insert(0, os.environ["ANL_DFT_CALC_PATH"])
+    from dft_calculators.factory import get_calculator_factory
+    return get_calculator_factory(name)()
+
+
+t0 = time.time()
+try:
+    signal.signal(signal.SIGALRM, on_alarm)
+    signal.alarm(timeout)
+    atoms = read("POSCAR", format="vasp")
+    atoms.calc = make_calc(name)
+    try:
+        atoms.set_constraint([FixSymmetry(atoms)])
+    except Exception:
+        pass  # 対称性取得失敗時は拘束なし
+    cf = CellFilter(atoms)
+    opt = BFGS(cf, logfile="opt.log")
+    converged = bool(opt.run(fmax=fmax, steps=steps))
+    e = float(atoms.get_potential_energy())
+    if not np.isfinite(e):
+        raise ValueError("non-finite energy")
+    with open("log.tote", "w") as f:
+        f.write(str(e))
+    write("CONTCAR", atoms, format="vasp")
+    status("done" if converged else "not_converged", converged=converged,
+           nsteps=int(opt.nsteps), energy=e, seconds=time.time() - t0)
+except TimeoutError as ex:
+    status("timeout", error=str(ex))
+    sys.exit(1)
+except Exception as ex:  # noqa: BLE001
+    status("error", error=f"{type(ex).__name__}: {ex}")
+    sys.exit(1)
+finally:
+    signal.alarm(0)

@@ -1,0 +1,6 @@
+#!/bin/sh
+# anl-cryspy generate 用ジョブスクリプト。CrySPY が末尾に stat_job 更新行を追記する。
+mkdir -p "$ANL_CRYSPY_PIDDIR" && echo $$ > "$ANL_CRYSPY_PIDDIR/$$"
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4} MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
+PYTHONPATH="$ANL_DFT_CALC_PATH" "$DFT_VENV_PYTHON" ase_in.py > ase_in.out 2>&1
+rm -f "$ANL_CRYSPY_PIDDIR/$$"
