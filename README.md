@@ -153,3 +153,10 @@ anl-cryspy generate --composition Au2CuPd --n 5 --seed 0 --out OUT \
 EMT では RS/EA とも再現を確認したが、ML 計算機の浮動小数点差で順位が変わる可能性がある(ベストエフォート)。
 CrySPY は逐次起動方式のため小規模探索でも 1 起動あたり約 1.5 s の固定オーバーヘッドがある。
 テスト: `uv run --offline --frozen --with pytest pytest -q`(`ANL_CRYSPY_TEST_SLOW=1` で EA/seed、`ANL_CRYSPY_TEST_CHGNET=1` で CHGNet も実行)。
+
+### 活用可能な純正機能(csp-cryspy 1.4.3、監査結果)
+- console_scripts: `cryspy`(`-n` 非表示/`-c` clean/`-b` backup/`-g` debug/`-p` MPI。`cryspy.stat` が無ければ初期化、有れば再開)、
+  `cryspy-skip ID...`(結果不正な構造を skip 扱いにし rslt/opt_struc/elite を更新)、`cryspy-calc-convex-hull GEN` と `cryspy-Eplot`(**algo=EA-vc 専用**の凸包計算/作図)。
+- Python API: `cryspy.IO.pkl_data.load_rslt()`(DataFrame: E_eV_atom, Opt, Gen 等)/`load_opt_struc()`/`load_init_struc()`/`load_elite_*`。anl-cryspy generate は既にこれを使用。
+- cryspy.in: `stop_next_struc`/`recalc`/`maxgen_ea`/`struc_mode`/`spgnum`/`n_elite` 等。乱数 seed のキーは純正に無い(sitecustomize 注入を維持)。
+- 将来: 多元系の安定性評価は algo=EA-vc + `end_point` で純正凸包(`data/convex_hull`)が使える(現 generate は固定組成のため未使用)。
