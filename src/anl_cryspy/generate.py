@@ -24,6 +24,57 @@ CRYSPY_ROOT = HERE.parent.parent  # <repo>/Cryspy
 DFT_ROOT = Path(os.environ.get("DFT_ROOT", CRYSPY_ROOT.parent))
 
 
+MANIFEST = ".anl_cryspy_manifest.json"
+# --force が workdir 内で消してよい CrySPY 生成物(固定名のみ)
+WORKDIR_OWNED = ["cryspy.in", "cryspy.stat", "calc_in", "data", "work", "pids", "log_cryspy",
+                 "err_cryspy", "lock_cryspy", "stop_cryspy", "skip_cryspy"]
+
+
+def _write_manifest(out: Path, m: dict):
+    (out / MANIFEST).write_text(json.dumps(m, ensure_ascii=False, indent=1))
+
+
+def _read_manifest(out: Path):
+    f = out / MANIFEST
+    if not f.is_file():
+        return None
+    try:
+        m = json.loads(f.read_text())
+        return m if isinstance(m, dict) and m.get("tool") == "anl-cryspy" else None
+    except Exception:
+        return None
+
+
+def _safe_rm_listed(out: Path, m: dict):
+    """マニフェスト記載のファイルだけを out 直下から削除(out 外・サブディレクトリは対象外)。"""
+    root = out.resolve()
+    for name in m.get("files", []):
+        if "/" in name or "\\" in name or name.startswith("."):
+            continue
+        f = out / name
+        if f.is_symlink() or (f.is_file() and f.resolve().parent == root):
+            f.unlink()
+    (out / MANIFEST).unlink(missing_ok=True)
+
+
+def _force_clean(out: Path):
+    m = _read_manifest(out)
+    if m is None:
+        raise InputError(f"--force: no valid {MANIFEST} in {out}; refusing to delete anything", "out_not_empty")
+    wd = m.get("workdir")
+    if wd and m.get("workdir_user_given"):
+        w = Path(wd)
+        if w.is_dir() and w.resolve() not in (Path("/"), Path.home().resolve(), out.resolve()) \
+                and (w / "cryspy.in").is_file():
+            for nme in WORKDIR_OWNED:
+                t = w / nme
+                if t.is_symlink() or t.is_file():
+                    t.unlink()
+                elif t.is_dir():
+                    shutil.rmtree(t, ignore_errors=True)
+    _safe_rm_listed(out, m)
+
+
 class InputError(Exception):
     code = "invalid_input"
 
@@ -146,6 +197,9 @@ def run_cryspy(workdir: Path, env: dict, deadline: float, mem_limit: float, algo
     done_marker = "Done all structures!" if algo == "RS" else "Reached maxgen_ea"
     peak = 0.0
     n_inv = 0
+    lg0 = workdir / "log_cryspy"
+    if (workdir / "cryspy.stat").exists() and lg0.exists() and done_marker in lg0.read_text()[-400:]:
+        return 0.0, 0  # 完了済み: 再探索せず
     while True:
         if time.time() > deadline:
             raise RuntimeFail("overall wall-time limit exceeded", "timeout")
@@ -201,7 +255,7 @@ def collect(workdir: Path, species, comp_counts):
 
 def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout, workers,
              tot_struc=None, n_pop=None, maxgen=None, fmax=0.05, steps=300, workdir=None,
-             keep_workdir=False):
+             keep_workdir=False, resume=False, manifest_cmd=None):
     from ase.io import write
     from pymatgen.analysis.structure_matcher import StructureMatcher
     from pymatgen.io.ase import AseAtomsAdaptor
@@ -215,13 +269,31 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
     cin, species, counts = build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms)
 
     out.mkdir(parents=True, exist_ok=True)
+    old = _read_manifest(out) if resume else None
+    if resume:
+        if old is None:
+            raise InputError(f"--resume: no valid {MANIFEST} in {out}", "resume_unavailable")
+        wd0 = old.get("workdir")
+        if not (wd0 and old.get("workdir_user_given") and (Path(wd0) / "cryspy.stat").is_file()):
+            raise InputError("--resume: previous --workdir with cryspy.stat not found "
+                             "(re-run the original command with --workdir to make it resumable)", "resume_unavailable")
+        for k, v in (("composition", comp), ("algo", algo), ("seed", seed), ("calculator", calculator)):
+            if old.get(k) != v:
+                raise InputError(f"--resume: {k} differs from the interrupted run ({old.get(k)!r} vs {v!r})", "resume_unavailable")
+        workdir = wd0
+        _safe_rm_listed(out, old)  # 旧出力CIFは再出力で置き換える
     own_tmp = workdir is None
     wd = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="anl_cryspy_", dir=os.environ.get("ANL_CRYSPY_WORKROOT")))
     wd.mkdir(parents=True, exist_ok=True)
-    (wd / "calc_in").mkdir(exist_ok=True)
-    (wd / "cryspy.in").write_text(cin)
-    shutil.copy(TEMPLATES / "ase_in.py_1", wd / "calc_in" / "ase_in.py_1")
-    shutil.copy(TEMPLATES / "job_cryspy", wd / "calc_in" / "job_cryspy")
+    if not resume:
+        (wd / "calc_in").mkdir(exist_ok=True)
+        (wd / "cryspy.in").write_text(cin)
+        shutil.copy(TEMPLATES / "ase_in.py_1", wd / "calc_in" / "ase_in.py_1")
+        shutil.copy(TEMPLATES / "job_cryspy", wd / "calc_in" / "job_cryspy")
+    manifest = {"tool": "anl-cryspy", "command": manifest_cmd, "composition": comp, "algo": algo,
+                "seed": seed, "calculator": calculator, "workdir": str(wd),
+                "workdir_user_given": not own_tmp, "files": [], "status": "running"}
+    _write_manifest(out, manifest)
     piddir = wd / "pids"
 
     env = {
@@ -279,6 +351,8 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
                      "cryspy_id": cid, "generation": gen, "opt_status": chk,
                      "energy_unit": "eV/atom", "workdir": str(wd)},
         })
+    manifest.update(files=[Path(x["path"]).name for x in structures], status="done")
+    _write_manifest(out, manifest)
     info = {"n_total_relaxed": len(rows), "n_cryspy_total": n_total, "removed": removed,
             "peak_mem_frac": round(peak, 3), "seconds": round(time.time() - t0, 1),
             "cryspy_invocations": n_inv, "tot_struc": tot_struc if algo == "RS" else None,
@@ -305,6 +379,10 @@ def add_args(g):
     g.add_argument("--n-pop", type=int, default=None, help="EA: population (default max(6,n))")
     g.add_argument("--maxgen", type=int, default=None, help="EA: total generations (default 5)")
     g.add_argument("--workdir", default=None, help="keep CrySPY working dir here (default: temp, deleted)")
+    g.add_argument("--resume", action="store_true",
+                   help="resume an interrupted run from out's manifest + its --workdir (cryspy.stat); done runs are re-exported")
+    g.add_argument("--force", action="store_true",
+                   help="delete only files this command created (per manifest) in out, then rerun")
     g.add_argument("--json", action="store_true")
 
 
@@ -318,7 +396,11 @@ def run(args) -> int:
             raise InputError("n/max-atoms/timeout/workers must be >=1; dedup-tol >=0")
         comp = parse_composition(args.composition)
         out = Path(args.out)
-        if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        if args.resume and args.force:
+            raise InputError("--resume and --force are mutually exclusive")
+        if args.force and out.is_dir():
+            _force_clean(out)
+        if not args.resume and out.exists() and (not args.force or not out.is_dir()) and (not out.is_dir() or any(out.iterdir())):
             raise InputError(f"output dir exists and is not empty: {out}", "out_not_empty")
         try:
             import cryspy  # noqa: F401
@@ -327,7 +409,8 @@ def run(args) -> int:
         structures, info = generate(
             comp, args.n, args.seed, out, args.dedup_tol, args.max_atoms, args.calculator,
             args.algo.upper(), args.timeout, args.workers, args.tot_struc, args.n_pop,
-            args.maxgen, workdir=args.workdir)
+            args.maxgen, workdir=args.workdir, resume=args.resume,
+            manifest_cmd=" ".join(sys.argv))
     except InputError as e:
         return fail(str(e), e.code, 1)
     except RuntimeFail as e:

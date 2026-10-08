@@ -160,3 +160,10 @@ CrySPY は逐次起動方式のため小規模探索でも 1 起動あたり約 
 - Python API: `cryspy.IO.pkl_data.load_rslt()`(DataFrame: E_eV_atom, Opt, Gen 等)/`load_opt_struc()`/`load_init_struc()`/`load_elite_*`。anl-cryspy generate は既にこれを使用。
 - cryspy.in: `stop_next_struc`/`recalc`/`maxgen_ea`/`struc_mode`/`spgnum`/`n_elite` 等。乱数 seed のキーは純正に無い(sitecustomize 注入を維持)。
 - 将来: 多元系の安定性評価は algo=EA-vc + `end_point` で純正凸包(`data/convex_hull`)が使える(現 generate は固定組成のため未使用)。
+
+### 再実行オプション(--resume / --force)
+- 既定: out が空でないと `out_not_empty`(exit 1)。契約どおり。
+- 実行時に `out/.anl_cryspy_manifest.json`(コマンド・組成・seed・workdir・生成CIF一覧)を書く。
+- `--resume`: マニフェストと `--workdir`(要 `cryspy.stat`)から純正の再開(`cryspy -n`)で続行。完了済みなら再探索せず再出力。条件(組成/algo/seed/calculator)が違う、または workdir が無い場合は `resume_unavailable`(exit 1)。再開したい探索は最初から `--workdir` を指定すること。
+- `--force`: マニフェスト記載のファイル(と、ユーザー指定 workdir 内の CrySPY 固定名の生成物)のみ削除して再実行。マニフェストが無ければ何も消さずエラー。無関係なファイルは残る。両者は排他。
+- ラウンド間の引継ぎは未実装(契約外)。

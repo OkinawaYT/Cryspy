@@ -100,3 +100,44 @@ def test_out_not_empty(tmp_path):
     (tmp_path / "f").write_text("x")
     rc, d = run("--composition", "Cu2Au2", "--out", str(tmp_path), "--calculator", "emt")
     assert rc == 1 and d["code"] == "out_not_empty"
+
+
+BASE = ["--composition", "Cu2Au2", "--n", "2", "--seed", "1", "--calculator", "emt",
+        "--algo", "rs", "--tot-struc", "4", "--workers", "2", "--timeout", "120"]
+
+
+def test_force_resume_manifest(tmp_path):
+    out, wd = tmp_path / "o", tmp_path / "wd"
+    args = [*BASE, "--out", str(out), "--workdir", str(wd)]
+    rc, d = run(*args)
+    assert rc == 0, d
+    assert (out / ".anl_cryspy_manifest.json").is_file()
+    # (a) default: out_not_empty
+    rc, d = run(*args)
+    assert rc == 1 and d["code"] == "out_not_empty"
+    # (c) resume of a finished run: re-export without re-searching
+    rc, d = run(*args, "--resume")
+    assert rc == 0, d
+    assert d["params"]["cryspy_invocations"] == 0
+    # (d) unrelated files survive --force
+    (out / "keep.txt").write_text("x")
+    (wd / "keep_wd.txt").write_text("x")
+    rc, d = run(*args, "--force")
+    assert rc == 0, d
+    assert (out / "keep.txt").exists() and (wd / "keep_wd.txt").exists()
+    validate(d)
+
+
+def test_force_without_manifest_refuses(tmp_path):
+    (tmp_path / "f").write_text("x")
+    rc, d = run(*BASE, "--out", str(tmp_path), "--force")
+    assert rc == 1 and d["code"] == "out_not_empty"
+    assert (tmp_path / "f").exists()
+
+
+def test_resume_unavailable(tmp_path):
+    rc, d = run(*BASE, "--out", str(tmp_path / "o"), "--resume")
+    assert rc == 1 and d["code"] == "resume_unavailable"
+    rc, d = run(*BASE, "--out", str(tmp_path / "o2"))  # temp workdir (deleted)
+    rc, d = run(*BASE, "--out", str(tmp_path / "o2"), "--resume")
+    assert rc == 1 and d["code"] == "resume_unavailable"
