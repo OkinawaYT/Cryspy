@@ -27,7 +27,7 @@ DFT_ROOT = Path(os.environ.get("DFT_ROOT", CRYSPY_ROOT.parent))
 MANIFEST = ".anl_cryspy_manifest.json"
 # --force が workdir 内で消してよい CrySPY 生成物(固定名のみ)
 WORKDIR_OWNED = ["cryspy.in", "cryspy.stat", "calc_in", "data", "work", "pids", "log_cryspy",
-                 "err_cryspy", "lock_cryspy", "stop_cryspy", "skip_cryspy"]
+                 "err_cryspy", "cryspy_stdout.log", "lock_cryspy", "stop_cryspy", "skip_cryspy"]
 
 
 def _write_manifest(out: Path, m: dict):
@@ -155,6 +155,14 @@ def mem_used_frac() -> float:
         return 0.0
 
 
+def reduced_counts(comp, max_atoms):
+    counts = list(comp.values())
+    g = math.gcd(*counts)
+    if sum(counts) > max_atoms:
+        counts = [c // g for c in counts]
+    return counts
+
+
 def build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms):
     from ase.data import atomic_numbers, covalent_radii
 
@@ -190,8 +198,63 @@ def build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms):
     return "\n".join(lines), species, counts
 
 
-def run_cryspy(workdir: Path, env: dict, deadline: float, mem_limit: float, algo: str, log):
-    cryspy_bin = Path(sys.executable).parent / "cryspy"
+def _progress_sig(workdir: Path):
+    """進捗の指標: cryspy.stat / data/ / work/ の最新 mtime と log_cryspy のサイズ。"""
+    mt, n = 0.0, 0
+    for name in ("cryspy.stat",):
+        try:
+            mt = max(mt, (workdir / name).stat().st_mtime)
+        except OSError:
+            pass
+    for sub in ("data", "work"):
+        d = workdir / sub
+        if d.is_dir():
+            for root, _dirs, files in os.walk(d):
+                for f in files:
+                    try:
+                        mt = max(mt, os.stat(os.path.join(root, f)).st_mtime)
+                        n += 1
+                    except OSError:
+                        pass
+    try:
+        lsz = (workdir / "log_cryspy").stat().st_size
+    except OSError:
+        lsz = 0
+    return (mt, n, lsz)
+
+
+def terminate_group(proc, grace: float = 5.0):
+    """自分が start_new_session=True で起動したプロセスグループだけを SIGTERM -> SIGKILL する。"""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
+    if pgid is None or pgid == os.getpgrp():  # 安全策: 自グループには絶対に触れない
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            return
+        t = time.time() + grace
+        while time.time() < t:
+            if proc.poll() is not None:
+                try:
+                    os.killpg(pgid, 0)  # グループに残りがいるか
+                except OSError:
+                    return
+            time.sleep(0.1)
+    proc.poll()
+
+
+def run_cryspy(workdir: Path, env: dict, deadline: float, mem_limit: float, algo: str, log,
+               stall_timeout: float = 600.0, kill_grace: float = 5.0):
+    """cryspy -n を繰り返し起動。戻り値 (peak_mem, n_invocations, truncated_reason|None)。
+
+    deadline(壁時計の絶対時刻)超過 / 進捗停止が stall_timeout 秒続く場合は、自分が起動した
+    プロセスグループを終了して "deadline" / "stall" を返す(例外にしない: 部分結果を集めるため)。
+    """
+    cryspy_bin = Path(os.environ.get("ANL_CRYSPY_BIN") or Path(sys.executable).parent / "cryspy")  # ANL_CRYSPY_BIN: test hook
     if not cryspy_bin.exists():
         raise InputError(f"cryspy not found next to {sys.executable}", "backend_unavailable")
     done_marker = "Done all structures!" if algo == "RS" else "Reached maxgen_ea"
@@ -199,24 +262,58 @@ def run_cryspy(workdir: Path, env: dict, deadline: float, mem_limit: float, algo
     n_inv = 0
     lg0 = workdir / "log_cryspy"
     if (workdir / "cryspy.stat").exists() and lg0.exists() and done_marker in lg0.read_text()[-400:]:
-        return 0.0, 0  # 完了済み: 再探索せず
-    while True:
+        return 0.0, 0, None  # 完了済み: 再探索せず
+    (workdir / "lock_cryspy").unlink(missing_ok=True)  # 前回 kill された場合の残骸
+    sig, last_change = _progress_sig(workdir), time.time()
+
+    def _tick():
+        nonlocal sig, last_change
+        s2 = _progress_sig(workdir)
+        if s2 != sig:
+            sig, last_change = s2, time.time()
         if time.time() > deadline:
-            raise RuntimeFail("overall wall-time limit exceeded", "timeout")
+            return "deadline"
+        if time.time() - last_change > stall_timeout:
+            return "stall"
+        return None
+
+    while True:
+        why = _tick()
+        if why:
+            return peak, n_inv, why
         m = mem_used_frac()
         peak = max(peak, m)
         if m > mem_limit:
             raise RuntimeFail(f"system memory {m:.0%} > limit {mem_limit:.0%}", "memory_limit")
-        r = sp.run([str(cryspy_bin), "-n"], cwd=workdir, env=env, capture_output=True, text=True)
-        n_inv += 1
-        if r.returncode != 0:
-            raise RuntimeFail(f"cryspy exited {r.returncode}: {(r.stderr or r.stdout)[-300:]}")
+        with open(workdir / "cryspy_stdout.log", "ab") as so:
+            proc = sp.Popen([str(cryspy_bin), "-n"], cwd=workdir, env=env, stdout=so,
+                            stderr=sp.STDOUT, start_new_session=True)
+            n_inv += 1
+            while proc.poll() is None:
+                time.sleep(0.5)
+                why = _tick()
+                if why:
+                    terminate_group(proc, kill_grace)
+                    (workdir / "lock_cryspy").unlink(missing_ok=True)
+                    return peak, n_inv, why
+        if proc.returncode != 0:
+            try:
+                tail = (workdir / "cryspy_stdout.log").read_text()[-300:]
+            except OSError:
+                tail = ""
+            raise RuntimeFail(f"cryspy exited {proc.returncode}: {tail}")
         lg = workdir / "log_cryspy"
         txt = lg.read_text() if lg.exists() else ""
         if done_marker in txt[-400:]:
             break
-        time.sleep(1.5)
-    return peak, n_inv
+        # 次の起動まで待つ(この間も deadline / stall を監視)
+        t_end = time.time() + 1.5
+        while time.time() < t_end:
+            time.sleep(0.3)
+            why = _tick()
+            if why:
+                return peak, n_inv, why
+    return peak, n_inv, None
 
 
 def kill_jobs(piddir: Path):
@@ -255,7 +352,8 @@ def collect(workdir: Path, species, comp_counts):
 
 def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout, workers,
              tot_struc=None, n_pop=None, maxgen=None, fmax=0.05, steps=300, workdir=None,
-             keep_workdir=False, resume=False, manifest_cmd=None):
+             keep_workdir=False, resume=False, manifest_cmd=None,
+             deadline_s=1800.0, stall_timeout=600.0, ea_min_atoms=3):
     from ase.io import write
     from pymatgen.analysis.structure_matcher import StructureMatcher
     from pymatgen.io.ase import AseAtomsAdaptor
@@ -266,6 +364,12 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
     tot_struc = tot_struc or max(4 * n, 20)
     n_pop = n_pop or max(6, n)
     maxgen = maxgen or 5
+    warnings, algo_fallback = [], None
+    algo_req = algo
+    natot = sum(reduced_counts(comp, max_atoms))
+    if algo == "EA" and ea_min_atoms > 0 and natot < ea_min_atoms:
+        algo, algo_fallback = "RS", f"ea->rs (natot<{ea_min_atoms})"
+        warnings.append(f"EA is unstable for natot={natot} (< --ea-min-atoms {ea_min_atoms}); fell back to RS")
     cin, species, counts = build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms)
 
     out.mkdir(parents=True, exist_ok=True)
@@ -277,7 +381,7 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
         if not (wd0 and old.get("workdir_user_given") and (Path(wd0) / "cryspy.stat").is_file()):
             raise InputError("--resume: previous --workdir with cryspy.stat not found "
                              "(re-run the original command with --workdir to make it resumable)", "resume_unavailable")
-        for k, v in (("composition", comp), ("algo", algo), ("seed", seed), ("calculator", calculator)):
+        for k, v in (("composition", comp), ("algo", algo_req), ("seed", seed), ("calculator", calculator)):
             if old.get(k) != v:
                 raise InputError(f"--resume: {k} differs from the interrupted run ({old.get(k)!r} vs {v!r})", "resume_unavailable")
         workdir = wd0
@@ -290,9 +394,9 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
         (wd / "cryspy.in").write_text(cin)
         shutil.copy(TEMPLATES / "ase_in.py_1", wd / "calc_in" / "ase_in.py_1")
         shutil.copy(TEMPLATES / "job_cryspy", wd / "calc_in" / "job_cryspy")
-    manifest = {"tool": "anl-cryspy", "command": manifest_cmd, "composition": comp, "algo": algo,
+    manifest = {"tool": "anl-cryspy", "command": manifest_cmd, "composition": comp, "algo": algo_req, "algo_effective": algo,
                 "seed": seed, "calculator": calculator, "workdir": str(wd),
-                "workdir_user_given": not own_tmp, "files": [], "status": "running"}
+                "workdir_user_given": not own_tmp, "files": [], "status": "running", "truncated": False}
     _write_manifest(out, manifest)
     piddir = wd / "pids"
 
@@ -307,17 +411,30 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
         "ANL_CRYSPY_PIDDIR": str(piddir),
         "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4",
     }
-    nstruct = tot_struc if algo == "RS" else n_pop * maxgen
-    per_round = math.ceil(nstruct / workers)
-    deadline = time.time() + timeout * per_round * 1.5 + 120
+    deadline = time.time() + deadline_s
+    eff_stall = max(stall_timeout, timeout + 60)  # 1構造の緩和中の無出力を誤検出しない
+    if eff_stall != stall_timeout:
+        warnings.append(f"stall-timeout raised {stall_timeout:g}s -> {eff_stall:g}s (must exceed per-structure --timeout)")
     mem_limit = float(os.environ.get("ANL_CRYSPY_MEM_LIMIT", "0.6"))
     t0 = time.time()
+    truncated = None
     try:
-        peak, n_inv = run_cryspy(wd, env, deadline, mem_limit, algo, None)
+        peak, n_inv, truncated = run_cryspy(wd, env, deadline, mem_limit, algo, None, eff_stall)
     except BaseException:
         kill_jobs(piddir)
         raise
-    rows, n_total = collect(wd, species, counts)
+    if truncated:
+        kill_jobs(piddir)
+        warnings.append(f"search truncated ({truncated}): "
+                        f"{'wall-clock --deadline ' + format(deadline_s, 'g') + 's exceeded' if truncated == 'deadline' else 'no cryspy progress for ' + format(eff_stall, 'g') + 's'}; "
+                        "partial results returned")
+    try:
+        rows, n_total = collect(wd, species, counts)
+    except Exception as e:
+        if not truncated:
+            raise
+        rows, n_total = [], 0
+        warnings.append(f"could not read partial results: {type(e).__name__}: {e}")
     rows.sort(key=lambda r: r[1])
 
     matcher = StructureMatcher(ltol=dedup_tol, stol=dedup_tol, angle_tol=5) if dedup_tol is not None else None
@@ -351,12 +468,18 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
                      "cryspy_id": cid, "generation": gen, "opt_status": chk,
                      "energy_unit": "eV/atom", "workdir": str(wd)},
         })
-    manifest.update(files=[Path(x["path"]).name for x in structures], status="done")
+    manifest.update(files=[Path(x["path"]).name for x in structures], status="truncated" if truncated else "done",
+                    truncated=bool(truncated), truncated_reason=truncated)
     _write_manifest(out, manifest)
     info = {"n_total_relaxed": len(rows), "n_cryspy_total": n_total, "removed": removed,
             "peak_mem_frac": round(peak, 3), "seconds": round(time.time() - t0, 1),
-            "cryspy_invocations": n_inv, "tot_struc": tot_struc if algo == "RS" else None,
+            "cryspy_invocations": n_inv, "algo_effective": algo.lower(), "algo_fallback": algo_fallback,
+            "deadline": deadline_s, "stall_timeout": eff_stall,
+            "tot_struc": tot_struc if algo == "RS" else None,
             "n_pop": n_pop if algo == "EA" else None, "maxgen": maxgen if algo == "EA" else None}
+    info.update(truncated=truncated, warnings=warnings)
+    if truncated:
+        keep_workdir = True  # --resume / 原因調査のため残す(own_tmp でも)
     if own_tmp and not keep_workdir and os.environ.get("ANL_CRYSPY_KEEP") != "1":
         shutil.rmtree(wd, ignore_errors=True)
         for s in structures:
@@ -374,6 +497,9 @@ def add_args(g):
     g.add_argument("--calculator", default="chgnet-0.3", help="calculators.yaml key, or 'emt' (test double)")
     g.add_argument("--algo", choices=["rs", "ea"], default="ea")
     g.add_argument("--timeout", type=int, default=600, help="per-structure relaxation timeout (s)")
+    g.add_argument("--deadline", type=float, default=1800.0, help="wall-clock limit for the whole generate (s); on expiry cryspy is killed and partial results returned")
+    g.add_argument("--stall-timeout", type=float, default=600.0, help="kill cryspy if no progress (cryspy.stat/data/work/log) for this long (s); raised to >= timeout+60")
+    g.add_argument("--ea-min-atoms", type=int, default=3, help="EA falls back to RS when natot < this (0 disables)")
     g.add_argument("--workers", type=int, default=1, help="concurrent relaxations (capped at 2)")
     g.add_argument("--tot-struc", type=int, default=None, help="RS: number of structures (default max(4n,20))")
     g.add_argument("--n-pop", type=int, default=None, help="EA: population (default max(6,n))")
@@ -392,7 +518,8 @@ def run(args) -> int:
         return rc
 
     try:
-        if args.n < 1 or args.max_atoms < 1 or args.dedup_tol < 0 or args.timeout < 1 or args.workers < 1:
+        if args.n < 1 or args.max_atoms < 1 or args.dedup_tol < 0 or args.timeout < 1 or args.workers < 1 \
+                or args.deadline <= 0 or args.stall_timeout <= 0 or args.ea_min_atoms < 0:
             raise InputError("n/max-atoms/timeout/workers must be >=1; dedup-tol >=0")
         comp = parse_composition(args.composition)
         out = Path(args.out)
@@ -410,6 +537,7 @@ def run(args) -> int:
             comp, args.n, args.seed, out, args.dedup_tol, args.max_atoms, args.calculator,
             args.algo.upper(), args.timeout, args.workers, args.tot_struc, args.n_pop,
             args.maxgen, workdir=args.workdir, resume=args.resume,
+            deadline_s=args.deadline, stall_timeout=args.stall_timeout, ea_min_atoms=args.ea_min_atoms,
             manifest_cmd=" ".join(sys.argv))
     except InputError as e:
         return fail(str(e), e.code, 1)
@@ -417,16 +545,22 @@ def run(args) -> int:
         return fail(str(e), e.code, 2)
     except Exception as e:
         return fail(f"{type(e).__name__}: {e}", "runtime_error", 2)
+    if not structures and info.get("truncated"):
+        return fail(f"search stalled/truncated ({info['truncated']}) before any relaxed structure was obtained",
+                    "search_stalled", 2)
     if not structures:
         return fail("no relaxed structure obtained (all relaxations failed or timed out)",
                     "generation_failed", 2)
     formula = "".join(f"{k}{v if v != 1 else ''}" for k, v in comp.items())
+    extra = {}
+    if info["truncated"]:
+        extra = {"truncated": True, "truncated_reason": info["truncated"]}
     print(json.dumps({
-        "status": "ok", "composition": formula, "backend": "cryspy", "seed": args.seed,
+        "status": "ok", **extra, "warnings": info["warnings"], "composition": formula, "backend": "cryspy", "seed": args.seed,
         "structures": structures, "n_requested": args.n, "n_generated": info["n_total_relaxed"],
         "n_unique": len(structures),
         "dedup": {"method": "StructureMatcher", "tol": args.dedup_tol, "removed": info["removed"]},
-        "params": {"algo": args.algo, "calculator": args.calculator, "max_atoms": args.max_atoms,
+        "params": {"algo": args.algo, "algo_effective": info["algo_effective"], "algo_fallback": info["algo_fallback"], "calculator": args.calculator, "max_atoms": args.max_atoms,
                    "timeout": args.timeout, "workers": min(args.workers, 2), **info,
                    "reproducible": "best-effort (CrySPY RNG seeded via sitecustomize injection)"},
     }, ensure_ascii=False))

@@ -167,3 +167,18 @@ CrySPY は逐次起動方式のため小規模探索でも 1 起動あたり約 
 - `--resume`: マニフェストと `--workdir`(要 `cryspy.stat`)から純正の再開(`cryspy -n`)で続行。完了済みなら再探索せず再出力。条件(組成/algo/seed/calculator)が違う、または workdir が無い場合は `resume_unavailable`(exit 1)。再開したい探索は最初から `--workdir` を指定すること。
 - `--force`: マニフェスト記載のファイル(と、ユーザー指定 workdir 内の CrySPY 固定名の生成物)のみ削除して再実行。マニフェストが無ければ何も消さずエラー。無関係なファイルは残る。両者は排他。
 - ラウンド間の引継ぎは未実装(契約外)。
+
+### 打ち切り・ハング対策(--deadline / --stall-timeout / --ea-min-atoms)
+
+| オプション | 既定 | 意味 |
+|---|---|---|
+| `--deadline SECONDS` | 1800 | generate 全体の壁時計の締切。`--timeout` は構造ごとの緩和の上限で、全体の締切ではない |
+| `--stall-timeout SECONDS` | 600 | cryspy.stat / data/ / work/ の更新と log_cryspy の増加が止まって SECONDS 経ったら打ち切る。誤検出防止のため `max(値, --timeout+60)` に引き上げ(警告に記録) |
+| `--ea-min-atoms N` | 3 | `--algo ea` で総原子数(既約化後)が N 未満なら RS にフォールバック。`0` で無効化 |
+
+- 超過時は、**自分が `start_new_session=True` で起動した cryspy のプロセスグループだけ**を SIGTERM→(5秒)→SIGKILL で終了し、それまでに緩和済みの構造を返す。JSON に `truncated: true`, `truncated_reason: "deadline"|"stall"`, `warnings`(追加のみで後方互換)。構造が0なら `status: error`, `code: search_stalled`, exit 2。
+- 打ち切り時 workdir は(一時でも)残し、manifest に `status: "truncated"`/`truncated_reason` を記録。`--workdir` 指定で実行していれば `--resume` で続行できる(`--force` との併用不可は従来どおり)。
+- フォールバック時は `params.algo_effective: "rs"`, `params.algo_fallback: "ea->rs (natot<3)"`(通常は `algo_effective` のみ、`algo_fallback: null`)。
+
+#### 既知の問題: EA が 2 原子相でハングする
+原因(cryspy 1.4.3 のソースとログから確定的、実行中のスタックは未採取): `cryspy/EA/gen_struc_EA/select_parents.py::_tournament` は、交叉の 2 親目を「1 親目と異なる ID」になるまで `while` で再抽選する。世代1後の重複除去ランキングが `t_size`(=2)以下の本数(2 原子 AuCu で頻発)だと、`replace=False` の抽選が常に同じ上位 1 構造を選び、無限ループになる(ログは "Generate children" の mindist 出力で止まり、CPU を使い続け、進捗なし)。EMT/AuCu/n_pop=6/maxgen=3 で 4 回中 1 回再現(他 3 回完走)。cryspy 側の修正は行わず、(1) natot<3 の RS フォールバック、(2) deadline/stall-timeout で緩和する。natot>=3 でも重複除去後の候補が 2 以下なら理論上起こり得る。

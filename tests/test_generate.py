@@ -141,3 +141,96 @@ def test_resume_unavailable(tmp_path):
     rc, d = run(*BASE, "--out", str(tmp_path / "o2"))  # temp workdir (deleted)
     rc, d = run(*BASE, "--out", str(tmp_path / "o2"), "--resume")
     assert rc == 1 and d["code"] == "resume_unavailable"
+
+
+# ---- deadline / stall-timeout / EA fallback -------------------------------------------------
+import signal
+import time
+
+from anl_cryspy import generate as G
+
+
+def _fake(tmp_path, body):
+    f = tmp_path / "fake_cryspy"
+    f.write_text("#!/bin/sh\n" + body)
+    f.chmod(0o755)
+    return f
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _gone(pid, t=5):
+    end = time.time() + t
+    while time.time() < end:
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.mark.parametrize("which", ["stall", "deadline"])
+def test_watchdog_kills_group_only(tmp_path, monkeypatch, which):
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "cryspy.stat").write_text("x")
+    child = tmp_path / "child.pid"
+    # 進捗を出さず sleep する偽 cryspy(孫プロセスも同グループに居る)
+    fake = _fake(tmp_path, f"sleep 300 &\necho $! > {child}\necho $$ > {tmp_path}/main.pid\nsleep 300\n")
+    monkeypatch.setenv("ANL_CRYSPY_BIN", str(fake))
+    # 無関係なプロセス(別グループ)。巻き込まれないこと
+    bystander = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        t0 = time.time()
+        if which == "stall":
+            r = G.run_cryspy(wd, dict(os.environ), time.time() + 100, 0.99, "RS", None, stall_timeout=2, kill_grace=1)
+        else:
+            r = G.run_cryspy(wd, dict(os.environ), time.time() + 2, 0.99, "RS", None, stall_timeout=100, kill_grace=1)
+        assert r[2] == which and time.time() - t0 < 20
+        assert _gone(int((tmp_path / "main.pid").read_text()))
+        assert _gone(int(child.read_text()))
+        assert bystander.poll() is None and _alive(bystander.pid)
+    finally:
+        bystander.kill()
+
+
+def test_stall_not_triggered_with_progress(tmp_path, monkeypatch):
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "cryspy.stat").write_text("x")
+    fake = _fake(tmp_path, f"for i in 1 2 3 4; do echo $i >> {wd}/log_cryspy; sleep 1; done\n"
+                           f"echo 'Done all structures!' >> {wd}/log_cryspy\n")
+    monkeypatch.setenv("ANL_CRYSPY_BIN", str(fake))
+    r = G.run_cryspy(wd, dict(os.environ), time.time() + 60, 0.99, "RS", None, stall_timeout=3)
+    assert r[2] is None
+
+
+def test_generate_stall_no_structures_exit2(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANL_CRYSPY_BIN", str(_fake(tmp_path, "sleep 300\n")))
+    code = "import sys;from anl_cryspy.cli import main;sys.exit(main(sys.argv[1:]))"
+    p = subprocess.run([sys.executable, "-c", code, "generate", "--composition", "Cu2Au2", "--calculator", "emt",
+                        "--algo", "rs", "--out", str(tmp_path / "o"), "--workdir", str(tmp_path / "w"),
+                        "--timeout", "1", "--stall-timeout", "2", "--json"],
+                       capture_output=True, text=True, env=os.environ)
+    d = json.loads(p.stdout)
+    assert p.returncode == 2 and d["status"] == "error" and d["code"] == "search_stalled"
+    m = json.loads((tmp_path / "o" / ".anl_cryspy_manifest.json").read_text())
+
+
+def test_ea_fallback_to_rs_small_natot(tmp_path):
+    rc, d = run("--composition", "AuCu", "--n", "2", "--seed", "1", "--out", str(tmp_path / "o"),
+                "--calculator", "emt", "--algo", "ea", "--max-atoms", "2", "--tot-struc", "4", "--timeout", "120")
+    assert rc == 0, d
+    validate(d)
+    assert d["params"]["algo_effective"] == "rs" and d["params"]["algo_fallback"] == "ea->rs (natot<3)"
+    assert d["warnings"] and all(s["meta"]["algo"] == "RS" for s in d["structures"])
+
+
+def test_ea_fallback_disabled_and_reduced_counts():
+    assert sum(G.reduced_counts({"Au": 2, "Cu": 2}, 2)) == 2   # max-atoms で既約化 -> natot=2
+    assert sum(G.reduced_counts({"Au": 2, "Cu": 2}, 40)) == 4
