@@ -119,10 +119,24 @@ def update_cryspy_in(natot, nat_list, work_dir, elements, cryspy_in):
     return True
 
 
+def cryspy_command():
+    """CrySPY 本体の実行ファイル。CRYSPY_BIN > リポジトリの .venv/bin/cryspy(正の導入先) > PATH 上の cryspy。
+
+    クラスタ等へ単体コピーされた場合(隣に .venv が無い)は従来どおり PATH 上の cryspy を使う。
+    """
+    if os.environ.get("CRYSPY_BIN"):
+        return os.environ["CRYSPY_BIN"]
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cand = os.path.join(root, ".venv", "bin", "cryspy")
+    if os.path.isdir(os.path.join(root, "src", "anl_cryspy")) and os.access(cand, os.X_OK):
+        return cand
+    return "cryspy"
+
+
 def run_cryspy(work_dir):
     """Run CrySPY in work_dir"""
     print(f"  Running CrySPY in {work_dir} ...")
-    subprocess.run("cryspy", shell=True, check=True, cwd=work_dir)
+    subprocess.run([cryspy_command()], check=True, cwd=work_dir)
 
 
 def save_results(natot, nat_list, work_dir, elements):

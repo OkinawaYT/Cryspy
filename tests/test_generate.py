@@ -234,3 +234,14 @@ def test_ea_fallback_to_rs_small_natot(tmp_path):
 def test_ea_fallback_disabled_and_reduced_counts():
     assert sum(G.reduced_counts({"Au": 2, "Cu": 2}, 2)) == 2   # max-atoms で既約化 -> natot=2
     assert sum(G.reduced_counts({"Au": 2, "Cu": 2}, 40)) == 4
+
+
+def test_cryspy_in_native_seed():
+    """csp-cryspy>=1.5 の再現性は [option] seed に依存する(1.5.1 で sitecustomize だけでは EA の seed 再現が崩れた)。"""
+    cin, _, _ = G.build_cryspy_in({"Cu": 2, "Au": 2}, "EA", 20, 6, 2, 1, 40, seed=2)
+    opt = cin.split("[option]", 1)[1]
+    assert "seed = 2" in opt
+    cin, _, _ = G.build_cryspy_in({"Cu": 2, "Au": 2}, "RS", 20, 6, 2, 1, 40, seed=-1)
+    assert f"seed = {2**32 - 1}" in cin
+    cin, _, _ = G.build_cryspy_in({"Cu": 2, "Au": 2}, "RS", 20, 6, 2, 1, 40)
+    assert "seed" not in cin

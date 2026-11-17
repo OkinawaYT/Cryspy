@@ -18,6 +18,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import versioning
+
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"
 CRYSPY_ROOT = HERE.parent.parent  # <repo>/Cryspy
@@ -27,7 +29,8 @@ DFT_ROOT = Path(os.environ.get("DFT_ROOT", CRYSPY_ROOT.parent))
 MANIFEST = ".anl_cryspy_manifest.json"
 # --force が workdir 内で消してよい CrySPY 生成物(固定名のみ)
 WORKDIR_OWNED = ["cryspy.in", "cryspy.stat", "calc_in", "data", "work", "pids", "log_cryspy",
-                 "err_cryspy", "cryspy_stdout.log", "lock_cryspy", "stop_cryspy", "skip_cryspy"]
+                 "err_cryspy", "cryspy_stdout.log", "lock_cryspy", "stop_cryspy", "skip_cryspy",
+                 versioning.PROVENANCE]
 
 
 def _write_manifest(out: Path, m: dict):
@@ -163,7 +166,7 @@ def reduced_counts(comp, max_atoms):
     return counts
 
 
-def build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms):
+def build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms, seed=None):
     from ase.data import atomic_numbers, covalent_radii
 
     species = list(comp)
@@ -194,7 +197,12 @@ def build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms):
                   f"maxgen_ea = {maxgen}", ""]
     lines += ["[structure]", f"natot = {sum(counts)}", "atype = " + " ".join(species),
               "nat = " + " ".join(map(str, counts)), md, "",
-              "[ASE]", "ase_python = ase_in.py", "", "[option]", ""]
+              "[ASE]", "ase_python = ase_in.py", "", "[option]"]
+    if seed is not None:
+        # csp-cryspy>=1.5.0 は np.random.default_rng を使い、sitecustomize の random/numpy.random.seed では
+        # 固定できない。純正の [option] seed(0..2**32-1、RNG 状態は data/pkl_data に保存され再開でも継続)を使う。
+        lines.append(f"seed = {int(seed) % 2**32}")
+    lines.append("")
     return "\n".join(lines), species, counts
 
 
@@ -353,7 +361,7 @@ def collect(workdir: Path, species, comp_counts):
 def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout, workers,
              tot_struc=None, n_pop=None, maxgen=None, fmax=0.05, steps=300, workdir=None,
              keep_workdir=False, resume=False, manifest_cmd=None,
-             deadline_s=1800.0, stall_timeout=600.0, ea_min_atoms=3):
+             deadline_s=1800.0, stall_timeout=600.0, ea_min_atoms=3, update_result=None):
     from ase.io import write
     from pymatgen.analysis.structure_matcher import StructureMatcher
     from pymatgen.io.ase import AseAtomsAdaptor
@@ -364,13 +372,14 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
     tot_struc = tot_struc or max(4 * n, 20)
     n_pop = n_pop or max(6, n)
     maxgen = maxgen or 5
-    warnings, algo_fallback = [], None
+    warnings, algo_fallback = list((update_result or {}).get("warnings", [])), None
+    cur_ver = versioning.installed_version(Path(sys.executable))
     algo_req = algo
     natot = sum(reduced_counts(comp, max_atoms))
     if algo == "EA" and ea_min_atoms > 0 and natot < ea_min_atoms:
         algo, algo_fallback = "RS", f"ea->rs (natot<{ea_min_atoms})"
         warnings.append(f"EA is unstable for natot={natot} (< --ea-min-atoms {ea_min_atoms}); fell back to RS")
-    cin, species, counts = build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms)
+    cin, species, counts = build_cryspy_in(comp, algo, tot_struc, n_pop, maxgen, workers, max_atoms, seed)
 
     out.mkdir(parents=True, exist_ok=True)
     old = _read_manifest(out) if resume else None
@@ -389,14 +398,20 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
     own_tmp = workdir is None
     wd = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="anl_cryspy_", dir=os.environ.get("ANL_CRYSPY_WORKROOT")))
     wd.mkdir(parents=True, exist_ok=True)
-    if not resume:
+    if resume:
+        w = versioning.resume_warning(wd, cur_ver)
+        if w:
+            warnings.append(w)
+    else:
+        versioning.write_provenance(wd, cur_ver, update_result)
         (wd / "calc_in").mkdir(exist_ok=True)
         (wd / "cryspy.in").write_text(cin)
         shutil.copy(TEMPLATES / "ase_in.py_1", wd / "calc_in" / "ase_in.py_1")
         shutil.copy(TEMPLATES / "job_cryspy", wd / "calc_in" / "job_cryspy")
     manifest = {"tool": "anl-cryspy", "command": manifest_cmd, "composition": comp, "algo": algo_req, "algo_effective": algo,
                 "seed": seed, "calculator": calculator, "workdir": str(wd),
-                "workdir_user_given": not own_tmp, "files": [], "status": "running", "truncated": False}
+                "workdir_user_given": not own_tmp, "files": [], "status": "running", "truncated": False,
+                "csp_cryspy_version": cur_ver}
     _write_manifest(out, manifest)
     piddir = wd / "pids"
 
@@ -438,12 +453,7 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
     rows.sort(key=lambda r: r[1])
 
     matcher = StructureMatcher(ltol=dedup_tol, stol=dedup_tol, angle_tol=5) if dedup_tol is not None else None
-    try:
-        import cryspy as _c
-        from importlib.metadata import version
-        ver = version("csp-cryspy")
-    except Exception:
-        ver = "unknown"
+    ver = cur_ver or "unknown"
     structures, reps, removed = [], [], 0
     for cid, e, pm, gen, chk in rows:
         if len(structures) >= n:
@@ -473,7 +483,9 @@ def generate(comp, n, seed, out, dedup_tol, max_atoms, calculator, algo, timeout
     _write_manifest(out, manifest)
     info = {"n_total_relaxed": len(rows), "n_cryspy_total": n_total, "removed": removed,
             "peak_mem_frac": round(peak, 3), "seconds": round(time.time() - t0, 1),
-            "cryspy_invocations": n_inv, "algo_effective": algo.lower(), "algo_fallback": algo_fallback,
+            "cryspy_invocations": n_inv, "csp_cryspy_version": cur_ver,
+            "auto_update": (update_result or {}).get("status", "disabled" if not resume else "resume"),
+            "algo_effective": algo.lower(), "algo_fallback": algo_fallback,
             "deadline": deadline_s, "stall_timeout": eff_stall,
             "tot_struc": tot_struc if algo == "RS" else None,
             "n_pop": n_pop if algo == "EA" else None, "maxgen": maxgen if algo == "EA" else None}
@@ -509,6 +521,8 @@ def add_args(g):
                    help="resume an interrupted run from out's manifest + its --workdir (cryspy.stat); done runs are re-exported")
     g.add_argument("--force", action="store_true",
                    help="delete only files this command created (per manifest) in out, then rerun")
+    g.add_argument("--no-update", action="store_true",
+                   help="do not auto-update csp-cryspy from PyPI before a new search (also: ANL_CRYSPY_AUTO_UPDATE=0)")
     g.add_argument("--json", action="store_true")
 
 
@@ -517,6 +531,14 @@ def run(args) -> int:
         print(json.dumps({"status": "error", "error": msg, "code": code}, ensure_ascii=False))
         return rc
 
+    reg = versioning.register_run(Path(args.out))  # 実行中は他プロセスの自動更新を止める
+    try:
+        return _run(args, fail)
+    finally:
+        versioning.unregister_run(reg)
+
+
+def _run(args, fail) -> int:
     try:
         if args.n < 1 or args.max_atoms < 1 or args.dedup_tol < 0 or args.timeout < 1 or args.workers < 1 \
                 or args.deadline <= 0 or args.stall_timeout <= 0 or args.ea_min_atoms < 0:
@@ -529,6 +551,10 @@ def run(args) -> int:
             _force_clean(out)
         if not args.resume and out.exists() and (not args.force or not out.is_dir()) and (not out.is_dir() or any(out.iterdir())):
             raise InputError(f"output dir exists and is not empty: {out}", "out_not_empty")
+        # 新規探索の開始時だけ PyPI 最新へ更新(再開時は更新しない)。cryspy を import する前に行う。
+        upd = None
+        if not args.resume and versioning.auto_update_enabled(args.no_update):
+            upd = versioning.update()
         try:
             import cryspy  # noqa: F401
         except ImportError:
@@ -538,7 +564,7 @@ def run(args) -> int:
             args.algo.upper(), args.timeout, args.workers, args.tot_struc, args.n_pop,
             args.maxgen, workdir=args.workdir, resume=args.resume,
             deadline_s=args.deadline, stall_timeout=args.stall_timeout, ea_min_atoms=args.ea_min_atoms,
-            manifest_cmd=" ".join(sys.argv))
+            manifest_cmd=" ".join(sys.argv), update_result=upd)
     except InputError as e:
         return fail(str(e), e.code, 1)
     except RuntimeFail as e:
@@ -562,6 +588,6 @@ def run(args) -> int:
         "dedup": {"method": "StructureMatcher", "tol": args.dedup_tol, "removed": info["removed"]},
         "params": {"algo": args.algo, "algo_effective": info["algo_effective"], "algo_fallback": info["algo_fallback"], "calculator": args.calculator, "max_atoms": args.max_atoms,
                    "timeout": args.timeout, "workers": min(args.workers, 2), **info,
-                   "reproducible": "best-effort (CrySPY RNG seeded via sitecustomize injection)"},
+                   "reproducible": "best-effort (CrySPY [option] seed + sitecustomize injection)"},
     }, ensure_ascii=False))
     return 0

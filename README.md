@@ -2,7 +2,7 @@
 
 ## これは何か / なぜ存在するか
 
-このディレクトリは、結晶構造予測ツール **CrySPY**（進化的アルゴリズム/ランダムサーチによる結晶構造探索。PyPI パッケージ `cryspy`、CLI コマンド `cryspy`）を、複数の組成（元素の種類・原子数）にわたって自動的にバッチ実行するための補助スクリプト集です。CrySPY 本体のソースコードはここには含まれておらず、別途インストールされた `cryspy` コマンド（本環境では `/opt/homebrew/bin/cryspy` としてグローバルインストール済み）を `subprocess` 経由で呼び出す「ラッパー／ドライバ」です。
+このディレクトリは、結晶構造予測ツール **CrySPY**（進化的アルゴリズム/ランダムサーチによる結晶構造探索。PyPI パッケージ `csp-cryspy`(上流 Tomoki-YAMASHITA/CrySPY)、CLI コマンド `cryspy`）を、複数の組成（元素の種類・原子数）にわたって自動的にバッチ実行するための補助スクリプト集です。CrySPY 本体のソースコードはここには含まれておらず、このリポジトリの `.venv` に依存として入る `csp-cryspy`（`.venv/bin/cryspy`）を `subprocess` 経由で呼び出す「ラッパー／ドライバ」です。導入先と版の扱いは「CrySPY の版管理」を参照。
 
 やっていることは大きく3段階です。
 
@@ -30,10 +30,24 @@ uv sync --extra chgnet
 ```
 
 依存ライブラリ:
-- 必須: `pymatgen>=2025.10.7`
+- 必須: `pymatgen>=2025.10.7`、`csp-cryspy>=1.5.1`(CrySPY 本体。下限のみ指定)
 - オプション（`chgnet` extra）: `chgnet>=0.4.0`
 
-**重要:** CrySPY 本体（`cryspy` コマンド）はこの `pyproject.toml` の依存に含まれていません。別途インストールしておく必要があります（本環境では `which cryspy` で `/opt/homebrew/bin/cryspy` が見つかる状態）。CrySPY 未インストールの環境では `run_cryspy.py` や `runCryspy.sh` は `cryspy: command not found` 相当のエラーで失敗します。
+## CrySPY の版管理(2026-11-18〜)
+
+- **正の導入先は `Cryspy/.venv` の 1 か所**(`pyproject.toml` の `csp-cryspy>=1.5.1` + `uv.lock`)。`ANL_CRYSPY_VENV` で別 venv を指定可。
+  - `anl-cryspy generate` / `anl-cryspy update` は、別環境(例: uv tool の `anl-cryspy` shim)から起動されても `.venv/bin/python` で自分を起動し直す(`ANL_CRYSPY_NO_REEXEC=1` で無効)。
+  - `run_cryspy.py` / `runCryspy.sh` は `CRYSPY_BIN` > `<repo>/.venv/bin/cryspy` > PATH 上の `cryspy` の順に使う(単体コピー先で `.venv` が無ければ PATH)。
+  - 旧 `/opt/homebrew/bin/cryspy`(homebrew の python@3.11 に pip で入れた csp-cryspy 1.3.0)は、python@3.11 本体が既に無く起動不能だったため 2026-11-18 に削除した。
+- **自動更新**: `anl-cryspy generate` の**新規探索の開始時**に PyPI の最新版を照会し、導入済みより新しければ
+  `uv lock --upgrade-package csp-cryspy` → `uv sync --inexact` で `.venv` を更新してから始める(`uv.lock` が変わるので必要ならコミット)。
+  - 更新しない場合: `--resume`(再開・完了済み run の再出力)、別の run が実行中(`anl-cryspy generate` の登録 `~/.cache/anl_cryspy/runs/` または `cryspy` プロセスがある)、
+    PyPI 照会失敗・オフライン、uv が見つからない。いずれも現在の版で続行し、出力 JSON の `warnings` に記録する。
+  - 無効化: `--no-update` または環境変数 `ANL_CRYSPY_AUTO_UPDATE=0`。
+  - 手動: `anl-cryspy update`(更新)/ `anl-cryspy update --check [--json]`(照会のみ。exit 0=最新, 1=更新あり, 2=照会失敗)。
+- **版の記録(provenance)**: 作業ディレクトリに `.anl_cryspy_version.json`(使った版・自動更新の結果)、out の manifest に `csp_cryspy_version`、
+  出力 JSON の `params.csp_cryspy_version` / `params.auto_update` と各構造の `meta.backend_version`。`--resume` で記録と現在の版が違えば(または記録が無ければ)警告する。
+- Command 側の日次ダイジェスト(更新通知)とは独立に動く。
 
 ## ファイルマップ / 設定リファレンス
 
@@ -113,7 +127,7 @@ qsub job.sh
 
 ## 既知の問題・注意点
 
-- **CrySPY本体は同梱されていない。** `pyproject.toml` の依存関係に `cryspy` パッケージが含まれておらず、`cryspy` コマンドが `PATH` に無い環境では即座に失敗する。
+- **CrySPY 本体は `csp-cryspy` として `.venv` に入る(2026-11-18 から依存に宣言)。** `uv sync` 前の環境や、`.venv` の無い単体コピー先では PATH 上の `cryspy` が必要。
 - **`ase_in.py_1` はリネームが必要。** `cryspy.in` の `[ASE] ase_python = ase_in.py` はファイル名 `ase_in.py` を期待しているが、リポジトリ内には `ase_in.py_1`（末尾に `_1`）としてしか存在しない。`run_cryspy.py` は自動でこれを見つけてコピーするが、`runCryspy.sh` 経由や手動実行の場合はリネームまたはコピーが必要。
 - **`runCryspy.sh` は `makeCIF.py` を呼ぶが、そのファイルは存在しない。** CIF生成をシェル版で自動化したい場合は別途対応が必要（`src/cryspy_make_cifs.py` を呼ぶよう修正するのが妥当）。
 - **`job.sh` のメール通知先がハードコード** されている（`y.tatetsu@meio-u.ac.jp`）。別ユーザーが使う場合は書き換えが必要。
@@ -124,7 +138,6 @@ qsub job.sh
 
 ## 推奨される次のステップ
 
-- `cryspy` を `pyproject.toml` の依存に追加する（PyPI公開版があれば）か、少なくともセットアップ手順に「別途 `pip install cryspy` 等が必要」と明記する運用を徹底する。
 - `ase_in.py_1` を `ase_in.py` にリネームするか、`cryspy.in` 側の参照名を `ase_in.py_1` に合わせて明示的に統一する。
 - `runCryspy.sh` が参照する `makeCIF.py` を `src/cryspy_make_cifs.py` の呼び出しに置き換えるか、シェル版自体を Python 版（`run_cryspy.py`）に一本化して二重メンテナンスを解消する。
 - `src/main.py`/`anl_cryspy/cli.py`（`anl-cryspy` コマンド）を、実際に `run_cryspy.py` の機能を呼び出す実用的なエントリポイントとして実装するか、不要であれば `pyproject.toml` の `[project.scripts]` ごと削除する。
@@ -149,17 +162,18 @@ anl-cryspy generate --composition Au2CuPd --n 5 --seed 0 --out OUT \
 - 緩和は FrechetCellFilter + FixSymmetry + BFGS(fmax 0.05, 300 step)、スレッド<=4。システムメモリが 60% を超えたら中断(`ANL_CRYSPY_MEM_LIMIT`)。
 - 作業ディレクトリは一時ディレクトリ(`ANL_CRYSPY_WORKROOT` で場所指定、`ANL_CRYSPY_KEEP=1` / `--workdir` で保持)。
 
-限界: 組成は固定セル(`--max-atoms` 超なら gcd で縮約)。seed は CrySPY 本体に無いため sitecustomize 注入(random/numpy/PYTHONHASHSEED/pyxtal)で固定しており、
+限界: 組成は固定セル(`--max-atoms` 超なら gcd で縮約)。seed は cryspy.in の `[option] seed`(csp-cryspy>=1.5.0 の純正機能。1.5.x は `np.random.default_rng` を使うため、従来の sitecustomize 注入(random/numpy/PYTHONHASHSEED/pyxtal、残置)だけでは EA の再現が崩れた)で固定しており、
 EMT では RS/EA とも再現を確認したが、ML 計算機の浮動小数点差で順位が変わる可能性がある(ベストエフォート)。
 CrySPY は逐次起動方式のため小規模探索でも 1 起動あたり約 1.5 s の固定オーバーヘッドがある。
 テスト: `uv run --offline --frozen --with pytest pytest -q`(`ANL_CRYSPY_TEST_SLOW=1` で EA/seed、`ANL_CRYSPY_TEST_CHGNET=1` で CHGNet も実行)。
 
-### 活用可能な純正機能(csp-cryspy 1.4.3、監査結果)
+### 活用可能な純正機能(csp-cryspy 1.4.3 で監査、1.5.1 の追加は末尾)
 - console_scripts: `cryspy`(`-n` 非表示/`-c` clean/`-b` backup/`-g` debug/`-p` MPI。`cryspy.stat` が無ければ初期化、有れば再開)、
   `cryspy-skip ID...`(結果不正な構造を skip 扱いにし rslt/opt_struc/elite を更新)、`cryspy-calc-convex-hull GEN` と `cryspy-Eplot`(**algo=EA-vc 専用**の凸包計算/作図)。
 - Python API: `cryspy.IO.pkl_data.load_rslt()`(DataFrame: E_eV_atom, Opt, Gen 等)/`load_opt_struc()`/`load_init_struc()`/`load_elite_*`。anl-cryspy generate は既にこれを使用。
-- cryspy.in: `stop_next_struc`/`recalc`/`maxgen_ea`/`struc_mode`/`spgnum`/`n_elite` 等。乱数 seed のキーは純正に無い(sitecustomize 注入を維持)。
+- cryspy.in: `stop_next_struc`/`recalc`/`maxgen_ea`/`struc_mode`/`spgnum`/`n_elite` 等。乱数 seed のキーは 1.4.3 には無い(1.5.0 で `[option] seed` が追加)。
 - 将来: 多元系の安定性評価は algo=EA-vc + `end_point` で純正凸包(`data/convex_hull`)が使える(現 generate は固定組成のため未使用)。
+- 1.5.x の追加(公式 CHANGELOG。seed 以外は generate では未使用): `[option] seed`(純正の乱数 seed。generate は 1.5.1 対応で使用)、`[EA] max_parent_attempts`(既定 50。親選択の試行上限。下記 2 原子 EA ハングの緩和になり得るが未検証)、`rslt_out`/`energy_output_interval`/`backup_interval`、`[visual]` 節、`end_point`→`ref_energies` 改名(旧名も可)、`add_max`/`elim_max` 既定 3→5(EA-vc)、`cryspy-print`/`cryspy-extract-struc`。1.4.0 で `natot` キーは廃止(generate は書くが無視され、1.5.1 でも動作確認済み)。
 
 ### 再実行オプション(--resume / --force)
 - 既定: out が空でないと `out_not_empty`(exit 1)。契約どおり。

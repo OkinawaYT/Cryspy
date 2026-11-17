@@ -40,9 +40,19 @@ generate_nat_combinations() {
     done
 }
 
+# CrySPY 本体: CRYSPY_BIN > このリポジトリの .venv/bin/cryspy(正の導入先) > PATH 上の cryspy
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -n "${CRYSPY_BIN}" ]; then
+    CRYSPY="${CRYSPY_BIN}"
+elif [ -x "${SCRIPT_DIR}/.venv/bin/cryspy" ]; then
+    CRYSPY="${SCRIPT_DIR}/.venv/bin/cryspy"
+else
+    CRYSPY="cryspy"
+fi
+
 # cryspy を実行する関数
 run_cryspy() {
-    cryspy & pid=$! # cryspyをバックグラウンド実行し、プロセスIDを変数pidに格納
+    "${CRYSPY}" & pid=$! # cryspyをバックグラウンド実行し、プロセスIDを変数pidに格納
 
     # cryspyコマンドの終了をポーリング
     while ps -p $pid > /dev/null; do

@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "pymatgen>=2025.10.7",
+    # CrySPY 本体。下限のみ(新規探索の開始時に anl-cryspy が PyPI 最新へ自動更新する。README 参照)
+    "csp-cryspy>=1.5.1",
 ]
 
 [project.optional-dependencies]
