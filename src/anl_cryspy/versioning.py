@@ -6,6 +6,9 @@
   `uv sync --inexact` で更新してから始める。再開・継続時は更新しない。
 - 照会失敗・オフライン・uv 不在・他の run が実行中なら更新せず、現在の版で続行(警告)。
 - 無効化: `--no-update` または `ANL_CRYSPY_AUTO_UPDATE=0`。
+- 更新で uv.lock が変わったら uv.lock だけを自動コミットする(push はしない)。無効化: `--no-auto-commit` または
+  `ANL_CRYSPY_AUTO_COMMIT=0`。git 管理外・uv.lock に更新前からの未コミット変更・detached HEAD / rebase / merge 中・
+  user.name/email 未設定・フック失敗のときはコミットせず警告して続行する。
 - 各 run の作業ディレクトリに使った版を `.anl_cryspy_version.json` で記録し、再開時に現在の版と比較する。
 """
 from __future__ import annotations
@@ -46,6 +49,12 @@ def auto_update_enabled(no_update_flag: bool = False) -> bool:
     if no_update_flag:
         return False
     return os.environ.get("ANL_CRYSPY_AUTO_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def auto_commit_enabled(no_commit_flag: bool = False) -> bool:
+    if no_commit_flag:
+        return False
+    return os.environ.get("ANL_CRYSPY_AUTO_COMMIT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def _vkey(v: str):
@@ -190,6 +199,72 @@ def _run_uv(args: list[str]) -> sp.CompletedProcess:
     return sp.run([_uv(), *args], cwd=CRYSPY_ROOT, env=env, capture_output=True, text=True, timeout=900)
 
 
+# ---- uv.lock の自動コミット ---------------------------------------------------------------
+
+LOCK = "uv.lock"
+
+
+def _git(args: list[str]) -> sp.CompletedProcess:
+    return sp.run(["git", *args], cwd=CRYSPY_ROOT, capture_output=True, text=True, timeout=120)
+
+
+def _lock_packages(text: str | None) -> dict[str, str]:
+    if not text:
+        return {}
+    try:
+        import tomllib
+        d = tomllib.loads(text)
+    except Exception:
+        return {}
+    return {p["name"]: p.get("version", "?") for p in d.get("package", []) if "name" in p}
+
+
+def commit_precheck() -> str | None:
+    """uv.lock を自動コミットできない理由(できるなら None)。更新前に呼ぶ。"""
+    try:
+        if _git(["rev-parse", "--is-inside-work-tree"]).stdout.strip() != "true":
+            return "not a git work tree"
+        if _git(["ls-files", "--error-unmatch", LOCK]).returncode != 0:
+            return f"{LOCK} is not tracked by git"
+        if _git(["status", "--porcelain", "--", LOCK]).stdout.strip():
+            return f"{LOCK} had uncommitted changes before the update"
+        if _git(["symbolic-ref", "-q", "HEAD"]).returncode != 0:
+            return "detached HEAD"
+        gd = Path(_git(["rev-parse", "--absolute-git-dir"]).stdout.strip())
+        for n in ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+            if (gd / n).exists():
+                return f"git operation in progress ({n})"
+        for k in ("user.name", "user.email"):
+            if not _git(["config", k]).stdout.strip():
+                return f"git {k} is not set"
+    except (OSError, sp.TimeoutExpired) as e:
+        return f"git unavailable ({type(e).__name__})"
+    return None
+
+
+def commit_lock(before: str | None, after: str | None, old: str | None, new: str | None) -> tuple[str | None, str | None]:
+    """uv.lock だけをコミットする。戻り値 (commit hash | None, 警告 | None)。lock が変わっていなければ (None, None)。"""
+    if before == after:
+        return None, None
+    a, b = _lock_packages(before), _lock_packages(after)
+    others = sorted(f"{n} {a.get(n, '-')} -> {b.get(n, '-')}" for n in set(a) | set(b)
+                    if a.get(n) != b.get(n) and n != DIST)
+    msg = f"deps: {DIST} {old} -> {new} (auto-update)"
+    if others:
+        msg += "\n\nAlso changed in uv.lock:\n" + "\n".join(f"- {o}" for o in others)
+    try:
+        r = _git(["add", "--", LOCK])
+        if r.returncode == 0:
+            r = _git(["commit", "-m", msg, "--", LOCK])
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout).strip().splitlines()[-2:]
+            return None, f"{LOCK} auto-commit failed ({' / '.join(tail)}); commit it manually"
+        h = _git(["rev-parse", "HEAD"]).stdout.strip()
+        return h, None
+    except (OSError, sp.TimeoutExpired) as e:
+        return None, f"{LOCK} auto-commit failed ({type(e).__name__}); commit it manually"
+
+
 def check(timeout: float = 10.0) -> dict:
     cur = installed_version()
     try:
@@ -199,7 +274,7 @@ def check(timeout: float = 10.0) -> dict:
     return {"installed": cur, "latest": latest, "update_available": is_newer(latest, cur), "error": err}
 
 
-def update(timeout: float = 10.0, force_busy: bool = False) -> dict:
+def update(timeout: float = 10.0, force_busy: bool = False, auto_commit: bool = True) -> dict:
     """PyPI 最新が新しければ正の venv を更新する。例外は投げず、結果 dict を返す。
 
     status: up_to_date | updated | skipped_offline | skipped_busy | skipped_no_uv | failed
@@ -223,6 +298,12 @@ def update(timeout: float = 10.0, force_busy: bool = False) -> dict:
         res.update(status="skipped_no_uv")
         res["warnings"].append(f"{DIST} {c['latest']} is available but uv was not found; not updating")
         return res
+    lock_path = CRYSPY_ROOT / LOCK
+    skip = commit_precheck() if (auto_commit and auto_commit_enabled()) else None
+    do_commit = auto_commit and auto_commit_enabled() and skip is None
+    if skip:
+        res["warnings"].append(f"{LOCK} will not be auto-committed: {skip}")
+    lock_before = lock_path.read_text() if lock_path.exists() else None
     steps = [["lock", "--upgrade-package", DIST], ["sync", "--inexact"]]
     for a in steps:
         try:
@@ -239,6 +320,13 @@ def update(timeout: float = 10.0, force_busy: bool = False) -> dict:
     res.update(status="updated" if res["after"] == c["latest"] else "failed")
     if res["status"] == "failed":
         res["warnings"].append(f"{DIST} update did not reach {c['latest']} (now {res['after']})")
+    elif do_commit:
+        lock_after = lock_path.read_text() if lock_path.exists() else None
+        h, w = commit_lock(lock_before, lock_after, res["before"], res["after"])
+        if h:
+            res["commit"] = h
+        if w:
+            res["warnings"].append(w)
     return res
 
 
@@ -248,7 +336,7 @@ def write_provenance(workdir: Path, version: str | None, update_result: dict | N
     d = {"dist": DIST, "version": version, "python": sys.executable,
          "recorded": _dt.datetime.now().isoformat(timespec="seconds")}
     if update_result:
-        d["auto_update"] = {k: update_result.get(k) for k in ("status", "before", "latest", "after")}
+        d["auto_update"] = {k: update_result.get(k) for k in ("status", "before", "latest", "after", "commit")}
     (Path(workdir) / PROVENANCE).write_text(json.dumps(d, ensure_ascii=False, indent=1))
 
 

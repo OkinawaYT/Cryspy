@@ -15,6 +15,7 @@ from anl_cryspy import generate as G
 def state(tmp_path, monkeypatch):
     monkeypatch.setattr(V, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(V, "_cryspy_processes", lambda: [])
+    monkeypatch.setenv("ANL_CRYSPY_AUTO_COMMIT", "0")  # 実リポジトリには決して触れない
     return tmp_path
 
 
@@ -191,3 +192,161 @@ def test_update_cli_check_json(monkeypatch, capsys):
     rc = cli.main(["update", "--check", "--json"])
     d = json.loads(capsys.readouterr().out)
     assert rc == 1 and d["status"] == "update_available" and d["latest"] == "1.6.0"
+
+
+# ---- uv.lock 自動コミット(一時 git リポジトリ) ---------------------------------------------
+
+LOCK_OLD = ('version = 1\n[[package]]\nname = "csp-cryspy"\nversion = "1.5.1"\n'
+            '[[package]]\nname = "numpy"\nversion = "2.0.0"\n')
+LOCK_NEW = LOCK_OLD.replace('"1.5.1"', '"1.6.0"')
+LOCK_NEW_CHAIN = LOCK_NEW.replace('"2.0.0"', '"2.1.0"')
+
+
+def _g(repo, *a):
+    return subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True, check=True).stdout
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    r = tmp_path / "repo"
+    r.mkdir()
+    for a in (["init", "-q", "-b", "main"], ["config", "user.name", "t"], ["config", "user.email", "t@x"]):
+        _g(r, *a)
+    (r / "uv.lock").write_text(LOCK_OLD)
+    (r / "other.txt").write_text("a\n")
+    _g(r, "add", "-A")
+    _g(r, "commit", "-qm", "init")
+    monkeypatch.setattr(V, "CRYSPY_ROOT", r)
+    monkeypatch.setattr(V, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(V, "_cryspy_processes", lambda: [])
+    monkeypatch.delenv("ANL_CRYSPY_AUTO_COMMIT", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setattr(V, "latest_pypi_version", lambda timeout=10: "1.6.0")
+    return r
+
+
+def _fake_uv(monkeypatch, repo, new_lock, versions=("1.5.1", "1.6.0")):
+    seq = iter(versions)
+    monkeypatch.setattr(V, "installed_version", lambda python=None: next(seq))
+    monkeypatch.setattr(V, "_uv", lambda: "/fake/uv")
+
+    def run(a):
+        if a[0] == "lock" and new_lock is not None:
+            (repo / "uv.lock").write_text(new_lock)
+        return subprocess.CompletedProcess(a, 0, "", "")
+
+    monkeypatch.setattr(V, "_run_uv", run)
+
+
+def _n_commits(repo):
+    return int(_g(repo, "rev-list", "--count", "HEAD"))
+
+
+def test_autocommit_only_uvlock(repo, monkeypatch):
+    _fake_uv(monkeypatch, repo, LOCK_NEW)
+    (repo / "other.txt").write_text("dirty\n")  # 持ち主の未コミット変更
+    (repo / "new.txt").write_text("untracked\n")
+    _g(repo, "add", "new.txt")  # 他のステージ済み変更も巻き込まない
+    r = V.update()
+    assert r["status"] == "updated" and r["commit"] == _g(repo, "rev-parse", "HEAD").strip()
+    assert _g(repo, "show", "--name-only", "--format=%s", "HEAD").split() == \
+        ["deps:", "csp-cryspy", "1.5.1", "->", "1.6.0", "(auto-update)", "uv.lock"]
+    st = _g(repo, "status", "--porcelain")
+    assert " M other.txt" in st and "A  new.txt" in st and "uv.lock" not in st
+    assert "Co-Authored" not in _g(repo, "log", "-1", "--format=%B")
+
+
+def test_autocommit_lists_chained_packages(repo, monkeypatch):
+    _fake_uv(monkeypatch, repo, LOCK_NEW_CHAIN)
+    V.update()
+    assert "numpy 2.0.0 -> 2.1.0" in _g(repo, "log", "-1", "--format=%B")
+
+
+def test_no_commit_when_lock_unchanged(repo, monkeypatch):
+    _fake_uv(monkeypatch, repo, None)
+    n = _n_commits(repo)
+    r = V.update()
+    assert r["status"] == "updated" and "commit" not in r and _n_commits(repo) == n
+
+
+def test_no_commit_when_up_to_date(repo, monkeypatch):
+    _fake_uv(monkeypatch, repo, LOCK_NEW, versions=("1.6.0",))
+    n = _n_commits(repo)
+    assert V.update()["status"] == "up_to_date" and _n_commits(repo) == n
+
+
+def _skipped(repo, monkeypatch, needle):
+    _fake_uv(monkeypatch, repo, LOCK_NEW)
+    n = _n_commits(repo)
+    r = V.update()
+    assert r["status"] == "updated" and "commit" not in r
+    assert any(needle in w for w in r["warnings"]), r["warnings"]
+    assert _n_commits(repo) == n
+
+
+def test_skip_dirty_lock(repo, monkeypatch):
+    (repo / "uv.lock").write_text(LOCK_OLD + "# local edit\n")
+    _skipped(repo, monkeypatch, "uncommitted changes")
+
+
+def test_skip_detached_head(repo, monkeypatch):
+    _g(repo, "checkout", "-q", "--detach")
+    _skipped(repo, monkeypatch, "detached HEAD")
+
+
+def test_skip_merge_in_progress(repo, monkeypatch):
+    gd = repo / ".git"
+    (gd / "MERGE_HEAD").write_text(_g(repo, "rev-parse", "HEAD"))
+    _skipped(repo, monkeypatch, "MERGE_HEAD")
+
+
+def test_skip_rebase_in_progress(repo, monkeypatch):
+    (repo / ".git" / "rebase-merge").mkdir()
+    _skipped(repo, monkeypatch, "rebase-merge")
+
+
+def test_skip_no_git_identity(repo, monkeypatch):
+    _g(repo, "config", "--unset", "user.email")
+    _skipped(repo, monkeypatch, "user.email")
+
+
+def test_skip_not_a_git_repo(tmp_path, monkeypatch):
+    d = tmp_path / "plain"
+    d.mkdir()
+    (d / "uv.lock").write_text(LOCK_OLD)
+    monkeypatch.setattr(V, "CRYSPY_ROOT", d)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(V, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(V, "_cryspy_processes", lambda: [])
+    monkeypatch.delenv("ANL_CRYSPY_AUTO_COMMIT", raising=False)
+    monkeypatch.setattr(V, "latest_pypi_version", lambda timeout=10: "1.6.0")
+    _fake_uv(monkeypatch, d, LOCK_NEW)
+    r = V.update()
+    assert r["status"] == "updated" and "commit" not in r and any("git" in w for w in r["warnings"])
+
+
+def test_skip_hook_failure(repo, monkeypatch):
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    _skipped(repo, monkeypatch, "auto-commit failed")
+    assert (repo / "uv.lock").read_text() == LOCK_NEW  # lock 自体は更新済みのまま
+
+
+def test_disable_env_and_flag(repo, monkeypatch):
+    _fake_uv(monkeypatch, repo, LOCK_NEW)
+    n = _n_commits(repo)
+    monkeypatch.setenv("ANL_CRYSPY_AUTO_COMMIT", "0")
+    assert V.update()["status"] == "updated" and _n_commits(repo) == n
+    monkeypatch.delenv("ANL_CRYSPY_AUTO_COMMIT")
+    _g(repo, "checkout", "--", "uv.lock")
+    _fake_uv(monkeypatch, repo, LOCK_NEW)
+    assert V.update(auto_commit=False)["status"] == "updated" and _n_commits(repo) == n
+    assert not V.auto_commit_enabled(no_commit_flag=True)
+
+
+def test_provenance_records_commit(tmp_path):
+    V.write_provenance(tmp_path, "1.6.0", {"status": "updated", "before": "1.5.1", "latest": "1.6.0",
+                                           "after": "1.6.0", "commit": "abc123"})
+    assert V.read_provenance(tmp_path)["auto_update"]["commit"] == "abc123"

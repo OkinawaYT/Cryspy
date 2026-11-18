@@ -523,6 +523,8 @@ def add_args(g):
                    help="delete only files this command created (per manifest) in out, then rerun")
     g.add_argument("--no-update", action="store_true",
                    help="do not auto-update csp-cryspy from PyPI before a new search (also: ANL_CRYSPY_AUTO_UPDATE=0)")
+    g.add_argument("--no-auto-commit", action="store_true",
+                   help="do not auto-commit uv.lock after an auto-update (also: ANL_CRYSPY_AUTO_COMMIT=0)")
     g.add_argument("--json", action="store_true")
 
 
@@ -554,7 +556,7 @@ def _run(args, fail) -> int:
         # 新規探索の開始時だけ PyPI 最新へ更新(再開時は更新しない)。cryspy を import する前に行う。
         upd = None
         if not args.resume and versioning.auto_update_enabled(args.no_update):
-            upd = versioning.update()
+            upd = versioning.update(auto_commit=not args.no_auto_commit)
         try:
             import cryspy  # noqa: F401
         except ImportError:

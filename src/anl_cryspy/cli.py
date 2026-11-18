@@ -54,6 +54,8 @@ def _update(argv):
     ap = argparse.ArgumentParser(prog="anl-cryspy update",
                                  description="update csp-cryspy in the canonical venv to the latest PyPI release")
     ap.add_argument("--check", action="store_true", help="only report installed/latest, do not install")
+    ap.add_argument("--no-auto-commit", action="store_true",
+                    help="do not auto-commit uv.lock after updating (also: ANL_CRYSPY_AUTO_COMMIT=0)")
     ap.add_argument("--json", action="store_true")
     try:
         ns = ap.parse_args(argv)
@@ -64,7 +66,7 @@ def _update(argv):
         r["status"] = "error" if r["error"] else ("update_available" if r["update_available"] else "up_to_date")
         rc = 2 if r["error"] else (1 if r["update_available"] else 0)
     else:
-        r = versioning.update()
+        r = versioning.update(auto_commit=not ns.no_auto_commit)
         rc = 0 if r["status"] in ("up_to_date", "updated") else 2
     r["venv"] = str(versioning.canonical_venv())
     if ns.json:

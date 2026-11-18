@@ -40,10 +40,15 @@ uv sync --extra chgnet
   - `run_cryspy.py` / `runCryspy.sh` は `CRYSPY_BIN` > `<repo>/.venv/bin/cryspy` > PATH 上の `cryspy` の順に使う(単体コピー先で `.venv` が無ければ PATH)。
   - 旧 `/opt/homebrew/bin/cryspy`(homebrew の python@3.11 に pip で入れた csp-cryspy 1.3.0)は、python@3.11 本体が既に無く起動不能だったため 2026-11-18 に削除した。
 - **自動更新**: `anl-cryspy generate` の**新規探索の開始時**に PyPI の最新版を照会し、導入済みより新しければ
-  `uv lock --upgrade-package csp-cryspy` → `uv sync --inexact` で `.venv` を更新してから始める(`uv.lock` が変わるので必要ならコミット)。
+  `uv lock --upgrade-package csp-cryspy` → `uv sync --inexact` で `.venv` を更新してから始める。
   - 更新しない場合: `--resume`(再開・完了済み run の再出力)、別の run が実行中(`anl-cryspy generate` の登録 `~/.cache/anl_cryspy/runs/` または `cryspy` プロセスがある)、
     PyPI 照会失敗・オフライン、uv が見つからない。いずれも現在の版で続行し、出力 JSON の `warnings` に記録する。
   - 無効化: `--no-update` または環境変数 `ANL_CRYSPY_AUTO_UPDATE=0`。
+  - **uv.lock の自動コミット**: 更新で `uv.lock` が変わったら、**uv.lock だけ**を `deps: csp-cryspy <旧> -> <新> (auto-update)` でコミットする
+    (`git add uv.lock && git commit -- uv.lock`。他の変更は巻き込まない。依存が連鎖更新されたら本文に一覧)。**push は自動では行わない(手動)**。
+    次の場合はコミットせず警告して探索は続行: git 管理外(配布物)、uv.lock に更新前からの未コミット変更、detached HEAD・rebase/merge 中、
+    git の user.name/email 未設定、フック等でコミット失敗。版が変わらなければ何も作らない。コミットできたらハッシュを `.anl_cryspy_version.json` の `auto_update.commit` に記録。
+    無効化: `--no-auto-commit` または `ANL_CRYSPY_AUTO_COMMIT=0`(`anl-cryspy update` も同じ)。
   - 手動: `anl-cryspy update`(更新)/ `anl-cryspy update --check [--json]`(照会のみ。exit 0=最新, 1=更新あり, 2=照会失敗)。
 - **版の記録(provenance)**: 作業ディレクトリに `.anl_cryspy_version.json`(使った版・自動更新の結果)、out の manifest に `csp_cryspy_version`、
   出力 JSON の `params.csp_cryspy_version` / `params.auto_update` と各構造の `meta.backend_version`。`--resume` で記録と現在の版が違えば(または記録が無ければ)警告する。
