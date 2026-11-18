@@ -16,7 +16,21 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(V, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(V, "_cryspy_processes", lambda: [])
     monkeypatch.setenv("ANL_CRYSPY_AUTO_COMMIT", "0")  # 実リポジトリには決して触れない
+    for k in V.BATCH_JOB_VARS + ("ANL_CRYSPY_UPDATE_IN_JOB",):
+        monkeypatch.delenv(k, raising=False)
     return tmp_path
+
+
+def test_update_skipped_in_batch_job(state, monkeypatch):
+    monkeypatch.setattr(V, "installed_version", lambda python=None: "1.5.1")
+    monkeypatch.setattr(V, "latest_pypi_version", lambda timeout=10.0: pytest.fail("must not query PyPI"))
+    monkeypatch.setattr(V, "_run_uv", lambda a: pytest.fail("must not run uv"))
+    monkeypatch.setenv("PBS_JOBID", "123.pbs")
+    r = V.update()
+    assert r["status"] == "skipped_batch_job" and r["after"] == "1.5.1"
+    assert "login node" in r["warnings"][0]
+    monkeypatch.setenv("ANL_CRYSPY_UPDATE_IN_JOB", "1")
+    assert V.in_batch_job() is None
 
 
 def test_is_newer():

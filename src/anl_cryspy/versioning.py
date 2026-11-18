@@ -51,6 +51,17 @@ def auto_update_enabled(no_update_flag: bool = False) -> bool:
     return os.environ.get("ANL_CRYSPY_AUTO_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+BATCH_JOB_VARS = ("PBS_JOBID", "SLURM_JOB_ID", "PJM_JOBID", "LSB_JOBID")
+
+
+def in_batch_job() -> str | None:
+    """バッチジョブ(計算ノード)内なら該当する環境変数名。クラスタの計算ノードは外部ネットワークに出られない前提で、
+    そこでは自動更新しない(更新はログインノードで `anl-cryspy update`)。`ANL_CRYSPY_UPDATE_IN_JOB=1` で解除。"""
+    if os.environ.get("ANL_CRYSPY_UPDATE_IN_JOB") == "1":
+        return None
+    return next((k for k in BATCH_JOB_VARS if os.environ.get(k)), None)
+
+
 def auto_commit_enabled(no_commit_flag: bool = False) -> bool:
     if no_commit_flag:
         return False
@@ -277,8 +288,14 @@ def check(timeout: float = 10.0) -> dict:
 def update(timeout: float = 10.0, force_busy: bool = False, auto_commit: bool = True) -> dict:
     """PyPI 最新が新しければ正の venv を更新する。例外は投げず、結果 dict を返す。
 
-    status: up_to_date | updated | skipped_offline | skipped_busy | skipped_no_uv | failed
+    status: up_to_date | updated | skipped_offline | skipped_busy | skipped_no_uv | skipped_batch_job | failed
     """
+    job = in_batch_job()
+    if job:
+        cur = installed_version()
+        return {"dist": DIST, "before": cur, "latest": None, "after": cur, "status": "skipped_batch_job",
+                "warnings": [f"{DIST}: inside a batch job ({job}); not updating on a compute node "
+                             f"(run `anl-cryspy update` on the login node). Using installed {cur}"]}
     c = check(timeout)
     res = {"dist": DIST, "before": c["installed"], "latest": c["latest"], "after": c["installed"], "warnings": []}
     if c["error"]:

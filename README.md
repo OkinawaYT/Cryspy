@@ -53,6 +53,15 @@ uv sync --extra chgnet
 - **版の記録(provenance)**: 作業ディレクトリに `.anl_cryspy_version.json`(使った版・自動更新の結果)、out の manifest に `csp_cryspy_version`、
   出力 JSON の `params.csp_cryspy_version` / `params.auto_update` と各構造の `meta.backend_version`。`--resume` で記録と現在の版が違えば(または記録が無ければ)警告する。
 - Command 側の日次ダイジェスト(更新通知)とは独立に動く。
+- **クラスタ(systemB / systemC、2026-11-18〜)**: Mac と同じく `~/DFT/Cryspy/.venv`(uv、`uv sync --frozen`)に一本化。
+  - 配布: Mac から rsync(`--delete` なし、`.git`・`.venv` 除外。宛先は `"${c}:DFT/Cryspy/"`)→ ログインノードで `cd ~/DFT/Cryspy && uv sync --frozen`(systemC は uv が tokio panic することがあり、`UV_CONCURRENT_DOWNLOADS=2 UV_CONCURRENT_INSTALLS=2 TOKIO_WORKER_THREADS=2` を付ける)。
+  - `job.sh` は `CRYSPY_BIN`(既定 `~/DFT/Cryspy/.venv/bin/cryspy`)と `RUN_CRYSPY`(既定 `~/DFT/Cryspy/src/run_cryspy.py`)を使う。
+  - **計算ノードでは更新しない**: バッチジョブ内(`PBS_JOBID` / `SLURM_JOB_ID` / `PJM_JOBID` / `LSB_JOBID`)では自動更新を飛ばし
+    `auto_update=skipped_batch_job` を記録(`ANL_CRYSPY_UPDATE_IN_JOB=1` で解除)。`job.sh` も `ANL_CRYSPY_AUTO_UPDATE=0`。
+    ログインノードで新規探索を始める `anl-cryspy generate` は Mac と同じく自動更新し、手動なら `.venv/bin/anl-cryspy update`。
+  - **uv.lock の自動コミットはしない**(クラスタは `.git` の無い rsync コピーのため `not a git work tree` で自動的に飛ばす)。
+    クラスタで lock が進んだら、Mac 側で更新してコミットし配り直す。版の記録(`.anl_cryspy_version.json`)と `--resume` の警告は有効。
+  - 戻し方: `export CRYSPY_BIN=$HOME/.local/bin/cryspy RUN_CRYSPY=$HOME/bin/run_cryspy.py`(旧来の miniconda python3.13 + pip --user の csp-cryspy 1.4.3。削除せず残してある)。
 
 ## ファイルマップ / 設定リファレンス
 
@@ -83,7 +92,7 @@ uv sync --extra chgnet
 
 ### ジョブ投入（PBS）
 
-- `job.sh` — PBS（`#PBS -q i2cpu` 等）ジョブスクリプト。`~/.local/bin/run_cryspy.py`（本リポジトリの `src/run_cryspy.py` をユーザーの bin にデプロイしたもの想定）を実行し、`CRYSPY_NUM_WORKERS` を `PBS_NCPUS` から自動設定する。宛先メールアドレスがハードコードされている（`y.tatetsu@meio-u.ac.jp`）。
+- `job.sh` — PBS（`#PBS -q i2cpu` 等）ジョブスクリプト。`~/DFT/Cryspy/src/run_cryspy.py` を `CRYSPY_BIN=~/DFT/Cryspy/.venv/bin/cryspy` で実行し、`CRYSPY_NUM_WORKERS` を `PBS_NCPUS` から自動設定する。宛先メールアドレスがハードコードされている（`y.tatetsu@meio-u.ac.jp`）。
 
 ### src/ レイアウト
 
@@ -128,7 +137,7 @@ cd /Users/tatetsu/GitHub/DFT/Cryspy
 qsub job.sh
 ```
 
-`job.sh` は `~/.local/bin/run_cryspy.py` を呼ぶため、事前に `src/run_cryspy.py`（および `cryspy_make_cifs.py`、`input.json`、`cryspy.in`、`calc_in/` 一式）をユーザーの `~/.local/bin/` 相当にデプロイしておく必要がある。
+`job.sh` は `~/DFT/Cryspy/src/run_cryspy.py` と `~/DFT/Cryspy/.venv/bin/cryspy` を使う(上記「クラスタ」参照)。作業ディレクトリには `input.json`、`cryspy.in`、`calc_in/` 一式を置く。
 
 ## 既知の問題・注意点
 

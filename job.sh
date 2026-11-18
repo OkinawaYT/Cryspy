@@ -5,8 +5,13 @@
 #PBS -l walltime=00:30:00
 #PBS -m e -M y.tatetsu@meio-u.ac.jp
 
-USER_BIN_DIR="/home/k0298/k029800/bin"
-CRYSPY_BIN_DIR="~/.local/bin/"
+# CrySPY は専用環境 ~/DFT/Cryspy/.venv に一本化(2026-11-18)。CRYSPY_DIR / CRYSPY_BIN で上書き可。
+# 戻し方: CRYSPY_BIN=$HOME/.local/bin/cryspy(旧来の pip --user 版)、RUN_CRYSPY=$HOME/bin/run_cryspy.py
+CRYSPY_DIR="${CRYSPY_DIR:-$HOME/DFT/Cryspy}"
+export CRYSPY_BIN="${CRYSPY_BIN:-${CRYSPY_DIR}/.venv/bin/cryspy}"
+RUN_CRYSPY="${RUN_CRYSPY:-${CRYSPY_DIR}/src/run_cryspy.py}"
+# 計算ノードでは自動更新しない(更新はログインノードで: cd ~/DFT/Cryspy && .venv/bin/anl-cryspy update)
+export ANL_CRYSPY_AUTO_UPDATE=0
 
 if [ -n "$PBS_O_WORKDIR" ]; then
   cd "$PBS_O_WORKDIR"
@@ -19,7 +24,7 @@ echo "Workdir: $(pwd)"
 module purge
 source ~/.bashrc
 
-export PATH="${USER_BIN_DIR}:${CRYSPY_BIN_DIR}:${PATH}"
+export PATH="$HOME/bin:${PATH}"
 
 # CPU数を環境変数に設定 (PBS_NCPUSが利用可能な場合)
 if [ -n "$PBS_NCPUS" ]; then
@@ -30,7 +35,8 @@ else
   echo "PBS_NCPUS not set, using default: 4"
 fi
 
-echo "Checking cryspy path:"
+echo "CRYSPY_BIN=${CRYSPY_BIN} ($("${CRYSPY_BIN%/cryspy}/python" -c 'import importlib.metadata as m; print(m.version("csp-cryspy"))' 2>/dev/null || echo '?'))"
+echo "Checking chgnet_opt path:"
 which chgnet_opt
 ls -l $(which chgnet_opt)
 
@@ -38,7 +44,7 @@ echo "=== Job Start ==="
 touch ready
 
 echo "Starting run_cryspy.py..."
-python "${USER_BIN_DIR}/run_cryspy.py"
+python "${RUN_CRYSPY}"
 
 echo "Job Finished at $(date)."
 
