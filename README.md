@@ -92,6 +92,7 @@ uv sync --extra chgnet
 
 ### ジョブ投入（PBS）
 
+- `job_pbs.sh`(systemC, `i2cpu`)/ `job_slurm.sh`(systemB, Slurm `i8cpu`)/ `job.sh`(= `job_pbs.sh`)— スケジューラ別ジョブスクリプト。本体は共通(`templates/job_body.sh`)でヘッダだけ違う。`anl-cryspy jobscript --cluster systemB -o job.sh` で生成(生成物と一致をテストで検証)。run_cryspy.py 経路でも `.anl_cryspy_version.json` に版と `auto_update=skipped_batch_job` を記録する。以下は PBS 版の説明:
 - `job.sh` — PBS（`#PBS -q i2cpu` 等）ジョブスクリプト。`~/DFT/Cryspy/src/run_cryspy.py` を `CRYSPY_BIN=~/DFT/Cryspy/.venv/bin/cryspy` で実行し、`CRYSPY_NUM_WORKERS` を `PBS_NCPUS` から自動設定する。宛先メールアドレスがハードコードされている（`y.tatetsu@meio-u.ac.jp`）。
 
 ### src/ レイアウト

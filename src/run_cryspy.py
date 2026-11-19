@@ -133,6 +133,33 @@ def cryspy_command():
     return "cryspy"
 
 
+def cryspy_python(cmd):
+    """cryspy 実行ファイルと同じ環境の python(版の照会用)。見つからなければ None(= 正の venv)。"""
+    exe = shutil.which(cmd) or cmd
+    cand = os.path.join(os.path.dirname(os.path.abspath(exe)), "python")
+    return cand if os.access(cand, os.X_OK) else None
+
+
+def record_version(work_dir="."):
+    """使った CrySPY の版・自動更新の可否と理由・再開時の不一致警告を .anl_cryspy_version.json に記録する
+    (anl-cryspy generate と同じ versioning の関数)。記録に失敗しても本処理は続行する。"""
+    try:
+        src_dir = os.path.dirname(os.path.abspath(__file__))
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+        from anl_cryspy import versioning
+        py = cryspy_python(cryspy_command())
+        r = versioning.record_run(work_dir, python=py)
+    except Exception as e:  # noqa: BLE001
+        print(f"warning: could not record CrySPY version: {type(e).__name__}: {e}")
+        return None
+    upd = r["auto_update"] or {}
+    print(f"CrySPY version: {r['version']} (auto_update={upd.get('status', 'resumed' if r['resumed'] else None)})")
+    for w in r["warnings"]:
+        print(f"warning: {w}")
+    return r
+
+
 def run_cryspy(work_dir):
     """Run CrySPY in work_dir"""
     print(f"  Running CrySPY in {work_dir} ...")
@@ -224,6 +251,8 @@ def main():
     natot_min = config.get("natot_min", 3)
     natot_max = config.get("natot_max", 20)
     cryspy_in = config.get("cryspy_in", "cryspy.in")
+
+    record_version(".")
 
     # Get number of workers
     num_workers = get_num_workers(config, sys.argv[1:])

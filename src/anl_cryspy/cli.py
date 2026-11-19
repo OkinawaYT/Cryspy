@@ -25,6 +25,8 @@ def main(argv=None):
         return _generate(args[1:])
     if args and args[0] == "update":
         return _update(args[1:])
+    if args and args[0] == "jobscript":
+        return _jobscript(args[1:])
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     src_dir = os.path.join(project_root, "src")
     if src_dir not in sys.path:
@@ -81,3 +83,34 @@ def _update(argv):
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _jobscript(argv):
+    """スケジューラ別の job.sh を出力する(systemB=slurm / systemC=pbs)。"""
+    import argparse
+    from . import jobscript as J
+
+    ap = argparse.ArgumentParser(prog="anl-cryspy jobscript")
+    ap.add_argument("--cluster", help="systemB (slurm) | systemC (pbs)")
+    ap.add_argument("--scheduler", choices=["pbs", "slurm"], help="クラスタ名の代わりに直接指定")
+    ap.add_argument("--queue", help="既定: i キュー(slurm=i8cpu, pbs=i2cpu)")
+    ap.add_argument("--walltime", default="00:30:00")
+    ap.add_argument("-o", "--output", help="書き出し先(既定: 標準出力)")
+    try:
+        ns = ap.parse_args(argv)
+        sched = J.scheduler_for(ns.cluster, ns.scheduler)
+    except SystemExit as e:
+        return 1 if e.code else 0
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    text = J.render(sched, queue=ns.queue, walltime=ns.walltime)
+    if ns.output:
+        import os
+        import stat
+        with open(ns.output, "w") as f:
+            f.write(text)
+        os.chmod(ns.output, os.stat(ns.output).st_mode | stat.S_IXUSR)
+    else:
+        sys.stdout.write(text)
+    return 0

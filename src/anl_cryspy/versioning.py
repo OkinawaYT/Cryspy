@@ -374,3 +374,27 @@ def resume_warning(workdir: Path, current: str | None) -> str | None:
         return (f"{DIST} version differs from the interrupted run ({p.get('version')} -> {current}); "
                 "results may not be reproducible")
     return None
+
+
+def record_run(workdir: Path, python: Path | None = None, no_update: bool = False,
+               auto_commit: bool = True) -> dict:
+    """run_cryspy.py 経路(job.sh から)用: generate と同じ記録を workdir に書く。
+
+    - 既に記録がある(再開): 更新せず、記録は上書きせず、版が違えば警告(resume_warning)を返す。
+    - 新規: バッチジョブ内なら update() が skipped_batch_job を返す。ジョブ外は auto_update_enabled のときだけ更新、
+      無効なら auto_update.status=disabled。使った版(python の csp-cryspy)を write_provenance で記録する。
+    戻り値: {"version", "resumed", "auto_update"(dict|None), "warnings"[list]}
+    """
+    wd = Path(workdir)
+    cur = installed_version(python)
+    if read_provenance(wd) is not None or (wd / PROVENANCE).exists():
+        w = resume_warning(wd, cur)
+        return {"version": cur, "resumed": True, "auto_update": None, "warnings": [w] if w else []}
+    upd = None
+    if in_batch_job() or auto_update_enabled(no_update):
+        upd = update(auto_commit=auto_commit)
+        cur = installed_version(python)
+    else:
+        upd = {"status": "disabled"}
+    write_provenance(wd, cur, upd)
+    return {"version": cur, "resumed": False, "auto_update": upd, "warnings": list(upd.get("warnings", []))}
